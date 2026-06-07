@@ -210,6 +210,36 @@ app.post('/api/iterate', async (req, res) => {
 
 // ── Split pipeline (fast preview + slow mesh share one image) ──────────────
 // STEP 1: text prompt OR (sourceImage + instruction) -> Gemini image.
+// Estimate an object's real-world size — the length of its LONGEST dimension in
+// meters — so the scene can size each thing sensibly (a mug ~0.12m, a dining
+// table ~1.6m) instead of forcing everything to one target. Clamped to a sane
+// range; returns null on failure so the client falls back to its default.
+const SIZE_SCHEMA = {
+  type: Type.OBJECT,
+  properties: { meters: { type: Type.NUMBER } },
+  required: ['meters'],
+};
+async function estimateSizeMeters(prompt) {
+  if (!ai) return null;
+  try {
+    const resp = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents:
+        `Estimate the typical real-world size of this object as the length of its ` +
+        `LONGEST dimension, in meters. Reply as JSON {"meters": number}. Examples: ` +
+        `coffee mug 0.12, wine bottle 0.3, book 0.25, potted plant 0.4, desk lamp ` +
+        `0.5, dining chair 0.9, dining table 1.6, sofa 2.0, car 4.5.\n\nOBJECT: ${prompt}`,
+      config: { responseMimeType: 'application/json', responseSchema: SIZE_SCHEMA, temperature: 0 },
+    });
+    const { meters } = JSON.parse(resp.text);
+    if (!Number.isFinite(meters)) return null;
+    return Math.min(20, Math.max(0.03, meters));
+  } catch (e) {
+    console.warn('[size] estimate failed:', e.message);
+    return null;
+  }
+}
+
 app.post('/api/image', async (req, res) => {
   const { prompt = '', sourceImage = null, instruction = '' } = req.body || {};
   try {
@@ -222,8 +252,13 @@ app.post('/api/image', async (req, res) => {
     }
     if (!prompt.trim()) return res.status(400).json({ error: 'prompt required' });
     console.log(`[image] "${prompt}"`);
-    const image = await geminiImage({ prompt });
-    res.json({ image, prompt });
+    // Run the size estimate alongside image gen — image gen is slower, so this
+    // adds no wall-clock latency to the generate flow.
+    const [image, sizeMeters] = await Promise.all([
+      geminiImage({ prompt }),
+      estimateSizeMeters(prompt),
+    ]);
+    res.json({ image, prompt, sizeMeters });
   } catch (e) {
     console.error('[image] error:', e);
     res.status(500).json({ error: e.message });
@@ -283,8 +318,8 @@ app.post('/api/lighting', async (req, res) => {
     console.log(`[lighting] "${prompt}"`);
     const instruction =
       `You control a three.js studio lighting rig. Starting from the CURRENT ` +
-      `state below, return the COMPLETE resulting state, changing ONLY what the ` +
-      `request implies and leaving everything else equal to the current value.\n\n` +
+      `state below, return the COMPLETE resulting state. Keep values the request ` +
+      `doesn't touch, but make whatever you DO change clearly visible.\n\n` +
       `Rig: key (main directional, warm by default), fill (soft secondary), rim ` +
       `(back/edge highlight — the silhouette "shine"), ambient (flat lift), ` +
       `hemisphere (sky/ground gradient fill), environmentIntensity (HDR ` +
@@ -293,7 +328,15 @@ app.post('/api/lighting', async (req, res) => {
       `Sane ranges: key/fill/rim 0..5, ambient/hemi 0..2, environmentIntensity ` +
       `0..3, exposure 0.1..3. Colors are hex strings. Warmer = toward orange; ` +
       `cooler = toward blue. "dim/moody" lowers intensities + exposure; ` +
-      `"bright/studio" raises them.\n\n` +
+      `"bright/studio" raises them.\n` +
+      `IMPORTANT — the scene is dominated by a NEUTRAL HDR environment and a white ` +
+      `rim light, so timid color changes get washed out and look like nothing ` +
+      `happened. When the request names a COLOR or a strong mood, COMMIT to it: ` +
+      `tint key, fill, ambient AND hemisphere-sky toward that color, set background ` +
+      `to a deep shade of it, drop environmentIntensity to ~0.1-0.2 so the neutral ` +
+      `HDR stops diluting the tint, and keep the tinted key in the upper range ` +
+      `(~1.5-2.5) so it reads. Only make small adjustments for explicitly subtle ` +
+      `requests ("a touch warmer", "slightly dimmer").\n\n` +
       `CURRENT: ${JSON.stringify(current)}\n\nREQUEST: ${prompt}`;
     const resp = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
