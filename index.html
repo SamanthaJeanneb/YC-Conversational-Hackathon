@@ -39,6 +39,8 @@
         margin: -2px 0 0 -2px; border-radius: 50%; background: #fff;
       }
       #crosshair.on-object #crosshair-dot { background: var(--accent); transform: scale(1.4); }
+      #crosshair.carrying::before, #crosshair.carrying::after { background: #4ade80; }
+      #crosshair.carrying #crosshair-dot { background: #4ade80; transform: scale(1.6); }
 
       /* ── Center prompt to lock pointer ───────────────────────── */
       #lock-hint {
@@ -113,7 +115,7 @@
       <div class="keys">
         <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / arrows to walk &nbsp;·&nbsp; mouse to look<br />
         <kbd>Left-click</kbd> an object to iterate &nbsp;·&nbsp; <kbd>Right-click</kbd> the ground to generate<br />
-        <kbd>L</kbd> to change the lighting &nbsp;·&nbsp; <kbd>Esc</kbd> to release
+        <kbd>G</kbd> to grab &amp; move an object &nbsp;·&nbsp; <kbd>L</kbd> to change the lighting &nbsp;·&nbsp; <kbd>Esc</kbd> to release
       </div>
     </div>
 

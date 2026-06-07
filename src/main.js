@@ -116,6 +116,8 @@ controls.addEventListener('unlock', () => {
   // Esc / programmatic unlock: only show the click-to-enter hint if no panel
   // is driving the unlock (panels need the cursor free for typing).
   if (!menuOpen) lockHint.classList.remove('hidden');
+  // Esc while carrying → cancel the move, snapping the object back.
+  if (grabbedId && !menuOpen) cancelGrab();
   // Released → drop movement so we don't keep gliding.
   keys.forward = keys.back = keys.left = keys.right = false;
 });
@@ -127,6 +129,7 @@ lockHint.addEventListener('click', () => {
 window.addEventListener('keydown', (e) => {
   if (menuOpen) return; // let the panel inputs handle typing
   if (e.code === 'KeyL') { openLightingPanel(); return; }
+  if (e.code === 'KeyG') { toggleGrab(); return; }
   switch (e.code) {
     case 'KeyW': case 'ArrowUp': keys.forward = true; break;
     case 'KeyS': case 'ArrowDown': keys.back = true; break;
@@ -150,13 +153,14 @@ const raycaster = new THREE.Raycaster();
 const screenCenter = new THREE.Vector2(0, 0);
 let hoverObjectId = null;   // object under the crosshair, or null
 let hoverPoint = null;      // world point under the crosshair (surface/object)
+let groundHoverPoint = null;// world point on a room surface only (for placement)
 
 function updateCrosshair() {
   raycaster.setFromCamera(screenCenter, camera);
   raycaster.far = REACH;
 
-  // Objects take priority for selection; collidables for placement point.
-  const objHits = raycaster.intersectObjects(selectables, true);
+  // While carrying, ignore object hover (don't pick up / re-target self).
+  const objHits = grabbedId ? [] : raycaster.intersectObjects(selectables, true);
   const surfHits = raycaster.intersectObjects(collidables, true);
 
   const firstObj = objHits[0];
@@ -164,6 +168,7 @@ function updateCrosshair() {
 
   hoverObjectId = null;
   hoverPoint = null;
+  groundHoverPoint = firstSurf ? firstSurf.point.clone() : null;
 
   // Whichever is closer wins for the displayed crosshair state / hover point.
   if (firstObj && (!firstSurf || firstObj.distance <= firstSurf.distance)) {
@@ -217,19 +222,73 @@ function applyHighlight(root, on) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-//  Mouse: left = select+iterate, right = generate menu
+//  Grab-to-move (carry the object on the crosshair, then click to place)
+// ─────────────────────────────────────────────────────────────────────────
+let grabbedId = null;
+let grabOriginal = null; // original position, for Esc-cancel
+
+function toggleGrab() {
+  if (grabbedId) { dropGrab(true); return; }
+  const id = hoverObjectId || selectedId;
+  if (!id || !store.get(id)) return;
+  grabbedId = id;
+  setSelected(id);
+  grabOriginal = store.get(id).root.position.clone();
+  crosshair.classList.add('carrying');
+  toast('Carrying — move with the mouse, click to place, Esc to cancel', false, 2800);
+}
+
+// Each frame while carrying: seat the object's base on the surface under the crosshair.
+function grabUpdate() {
+  const entry = store.get(grabbedId);
+  if (!entry) { grabbedId = null; return; }
+  const p = (groundHoverPoint ? groundHoverPoint.clone() : groundPointAhead());
+  clampToRoom(p);
+  const root = entry.root;
+  root.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(root);
+  const c = new THREE.Vector3(); box.getCenter(c);
+  root.position.x += p.x - c.x;
+  root.position.z += p.z - c.z;
+  root.position.y += p.y - box.min.y;
+}
+
+function dropGrab(commit) {
+  const entry = store.get(grabbedId);
+  if (entry) {
+    if (commit) {
+      entry.root.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(entry.root);
+      const c = new THREE.Vector3(); box.getCenter(c);
+      entry.placement.position.set(c.x, box.min.y, c.z); // so iterate swaps in place
+      toast('Object placed', false, 1400);
+    } else if (grabOriginal) {
+      entry.root.position.copy(grabOriginal);
+    }
+  }
+  grabbedId = null;
+  grabOriginal = null;
+  crosshair.classList.remove('carrying');
+}
+
+function cancelGrab() { if (grabbedId) dropGrab(false); }
+
+// ─────────────────────────────────────────────────────────────────────────
+//  Mouse: left = select+iterate (or place when carrying), right = generate menu
 // ─────────────────────────────────────────────────────────────────────────
 renderer.domElement.addEventListener('mousedown', (e) => {
   if (!controls.isLocked || menuOpen) return;
 
   if (e.button === 0) {
-    // Left-click: select object if the crosshair is on one; empty ground = noop.
+    // Left-click: place the carried object, else select the one under the crosshair.
+    if (grabbedId) { dropGrab(true); return; }
     if (hoverObjectId) {
       setSelected(hoverObjectId);
       openIteratePanel(hoverObjectId);
     }
   } else if (e.button === 2) {
-    // Right-click: open Generate menu, remembering where to place the object.
+    // Right-click: cancel a carry, else open Generate menu at the crosshair.
+    if (grabbedId) { cancelGrab(); return; }
     const point = hoverPoint ? hoverPoint.clone() : groundPointAhead();
     openGeneratePanel(point);
   }
@@ -344,7 +403,7 @@ async function runGenerate() {
   try {
     const img = await generateImage({ prompt });
     removePlaceholder(ph);
-    ph = addImageBillboard(placement, img.image); // fast shape preview
+    ph = addOutlineBillboard(placement, img.image); // fast shape preview (outline only)
 
     toast('Building 3D model…', true);
     const result = await imageToModel({ image: img.image, prompt: img.prompt || prompt });
@@ -385,7 +444,7 @@ async function runIterate() {
       prompt: entry.prompt,
       instruction,
     });
-    ph = addImageBillboard(placement, img.image); // fast shape preview of the change
+    ph = addOutlineBillboard(placement, img.image); // fast shape preview of the change (outline only)
 
     toast('Building 3D model…', true);
     const result = await imageToModel({ image: img.image, prompt: img.prompt || instruction });
@@ -535,31 +594,97 @@ function addBoxPlaceholder(point) {
   return mesh;
 }
 
-// Stage 2 (fast, ~seconds): the generated image as a camera-facing billboard —
-// the actual shape of what's coming, standing in until the GLB is ready.
-function addImageBillboard(point, dataURI) {
-  const tex = new THREE.TextureLoader().load(dataURI);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0.96, depthWrite: false });
+// Trace the object's outline from the preview image: silhouette boundary
+// (foreground-vs-background) + internal edges (Sobel), drawn in accent blue on
+// a transparent canvas — a wireframe-style line sketch of the shape, not the
+// full picture. Returns { canvas, aspect }.
+const OUTLINE_RGB = [110, 168, 255]; // #6ea8ff, matches the box placeholder
+function buildOutlineTexture(dataURI) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const maxDim = 320; // downscale for speed; lines stay crisp on a sprite
+        const s = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * s));
+        const h = Math.max(1, Math.round(img.height * s));
+
+        const src = document.createElement('canvas');
+        src.width = w; src.height = h;
+        const sctx = src.getContext('2d', { willReadFrequently: true });
+        sctx.drawImage(img, 0, 0, w, h);
+        const d = sctx.getImageData(0, 0, w, h).data;
+
+        // Background colour estimated from the four corners.
+        const gray = new Float32Array(w * h);
+        const fg = new Uint8Array(w * h);
+        const corners = [[0, 0], [w - 1, 0], [0, h - 1], [w - 1, h - 1]];
+        let br = 0, bg = 0, bb = 0;
+        for (const [cx, cy] of corners) { const i = (cy * w + cx) * 4; br += d[i]; bg += d[i + 1]; bb += d[i + 2]; }
+        br /= 4; bg /= 4; bb /= 4;
+        for (let p = 0; p < w * h; p++) {
+          const i = p * 4, r = d[i], g = d[i + 1], b = d[i + 2];
+          gray[p] = 0.299 * r + 0.587 * g + 0.114 * b;
+          fg[p] = (Math.abs(r - br) + Math.abs(g - bg) + Math.abs(b - bb)) > 60 ? 1 : 0;
+        }
+
+        const out = document.createElement('canvas');
+        out.width = w; out.height = h;
+        const octx = out.getContext('2d');
+        const o = octx.createImageData(w, h);
+        const GX = [-1, 0, 1, -2, 0, 2, -1, 0, 1];
+        const GY = [-1, -2, -1, 0, 0, 0, 1, 2, 1];
+        const INTERNAL = 70; // Sobel threshold for interior detail lines
+        for (let y = 1; y < h - 1; y++) {
+          for (let x = 1; x < w - 1; x++) {
+            const p = y * w + x;
+            let sx = 0, sy = 0, k = 0;
+            for (let j = -1; j <= 1; j++) for (let i2 = -1; i2 <= 1; i2++) {
+              const v = gray[(y + j) * w + (x + i2)]; sx += v * GX[k]; sy += v * GY[k]; k++;
+            }
+            const mag = Math.hypot(sx, sy);
+            // Silhouette: a foreground pixel touching the background.
+            const sil = fg[p] && (!fg[p - 1] || !fg[p + 1] || !fg[p - w] || !fg[p + w]);
+            let a = 0;
+            if (sil) a = 255;
+            else if (fg[p] && mag > INTERNAL) a = Math.min(255, (mag - INTERNAL) * 2.2);
+            const oi = p * 4;
+            o.data[oi] = OUTLINE_RGB[0]; o.data[oi + 1] = OUTLINE_RGB[1];
+            o.data[oi + 2] = OUTLINE_RGB[2]; o.data[oi + 3] = a;
+          }
+        }
+        octx.putImageData(o, 0, 0);
+        resolve({ canvas: out, aspect: w / h });
+      } catch (e) { reject(e); }
+    };
+    img.onerror = () => reject(new Error('outline image load failed'));
+    img.src = dataURI;
+  });
+}
+
+// Stage 2 (fast, ~seconds): the traced outline as a camera-facing billboard —
+// just the shape's lines, standing in until the GLB is ready.
+function addOutlineBillboard(point, dataURI) {
+  const mat = new THREE.SpriteMaterial({ transparent: true, opacity: 0.95, depthWrite: false });
   const sprite = new THREE.Sprite(mat);
   const base = MODEL_TARGET_SIZE * 1.25;
   sprite.scale.set(base, base, 1);
   sprite.position.set(point.x, point.y + base / 2, point.z);
   sprite.userData._placeholder = true;
-
-  // Correct aspect + height once the image dimensions are known.
-  const img = new Image();
-  img.onload = () => {
-    const aspect = img.width / img.height || 1;
-    const h = base;
-    const w = base * aspect;
-    sprite.scale.set(w, h, 1);
-    sprite.position.y = point.y + h / 2;
-  };
-  img.src = dataURI;
-
   scene.add(sprite);
   loadingPlaceholders.add(sprite);
+
+  buildOutlineTexture(dataURI).then(({ canvas, aspect }) => {
+    if (!loadingPlaceholders.has(sprite)) return; // already removed
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    mat.map = tex;
+    mat.needsUpdate = true;
+    const wsc = base * aspect;
+    sprite.scale.set(wsc, base, 1);
+    sprite.position.y = point.y + base / 2;
+  }).catch((err) => console.warn('[outline]', err.message));
+
   return sprite;
 }
 
@@ -626,6 +751,7 @@ function animate() {
     clampToRoom(camera.position);
 
     updateCrosshair();
+    if (grabbedId) grabUpdate();
   }
 
   // Pulse loading billboards so they read as "generating," not placed.

@@ -37,7 +37,12 @@ Check the backend is wired up: http://localhost:8787/api/health
 | Look | Mouse |
 | **Iterate** | **Left-click** an object → inline iterate control |
 | **Generate** | **Right-click** the ground/surface → generate menu (placed at the crosshair) |
+| **Move** | `G` to grab the object under the crosshair; it follows you — **left-click** to place, **right-click**/`Esc` to cancel |
+| **Lighting** | `L` → describe the lighting in natural language; applied live |
 | Release | `Esc` |
+
+While an object generates, a fast **outline placeholder** (silhouette + edges traced
+from the Gemini preview image) appears at the spot, then is replaced by the GLB.
 
 While a menu is open the pointer unlocks so you can type; it re-locks on close.
 
