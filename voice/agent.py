@@ -124,14 +124,10 @@ class SceneRouter(Agent):
                 "generate_object with a concise visual prompt (just the subject, e.g. 'a "
                 "red ceramic mug').\n"
                 "- A change to the object already in focus ('make it bigger', 'add "
-                "wings', 'turn it metallic') -> iterate_object with only the change.\n"
-                "APPROVAL GATE (iterate only): after an iterate_object call the app "
-                "shows a PREVIEW image and you ask the user 'want me to build it?'. On "
-                "that follow-up turn ONLY: 'yes / build it / go ahead / do it / looks "
-                "good / perfect / yeah' -> approve_build; 'no / cancel / scrap it / "
-                "never mind' -> cancel_build; but if they ask for a FURTHER change "
-                "('make it bluer', 'bigger') -> iterate_object again (it refines the "
-                "same preview). Never call approve_build / cancel_build at any other time.\n"
+                "wings', 'turn it metallic') -> iterate_object with only the change. This "
+                "builds the new version immediately — there is no approval step. If the "
+                "change is too vague to act on ('change it', 'make it cooler') call "
+                "ask_clarify ONCE for the missing detail; otherwise just iterate.\n"
                 "- Mood / ambiance / light requests -> set_lighting with the description. "
                 "ANY request about the scene's light, brightness, color, atmosphere, "
                 "time of day, or mood goes here — pass the user's own words as the "
@@ -206,27 +202,11 @@ class SceneRouter(Agent):
 
     @function_tool()
     async def iterate_object(self, context: RunContext, instruction: str) -> None:
-        """Modify the object currently selected / looked at. Use for changes to an
-        existing object ('make it bigger', 'add a handle', 'turn it red'). `instruction`
-        is only the change, not the original description. The browser generates a
-        PREVIEW image first; once it's on screen you'll ask the user to approve before
-        the model is rebuilt (see approve_build / cancel_build)."""
-        await self._route(context, {"type": "iterate", "instruction": instruction}, "One moment — previewing that.")
-
-    @function_tool()
-    async def approve_build(self, context: RunContext) -> None:
-        """Approve the previewed change and build the 3D model. Use ONLY right after you
-        asked 'want me to build it?' and the user agrees ('yes', 'build it', 'go ahead',
-        'do it', 'looks good', 'perfect', 'yeah'). If they instead ask for another change,
-        call iterate_object; if they decline, call cancel_build."""
-        await self._route(context, {"type": "approve_build"}, "Building it now.")
-
-    @function_tool()
-    async def cancel_build(self, context: RunContext) -> None:
-        """Discard the previewed change without building. Use ONLY right after you asked
-        'want me to build it?' and the user declines ('no', 'cancel', 'scrap it', 'never
-        mind', 'start over')."""
-        await self._route(context, {"type": "cancel_build"}, "Okay, scrapped that.")
+        """Modify the object currently selected / looked at, and build the new version
+        immediately (no approval step). Use for changes to an existing object ('make it
+        bigger', 'add a handle', 'turn it red'). `instruction` is only the change, not
+        the original description."""
+        await self._route(context, {"type": "iterate", "instruction": instruction}, f"Got it — {instruction}.")
 
     @function_tool()
     async def set_lighting(self, context: RunContext, description: str) -> None:
@@ -312,23 +292,6 @@ async def entrypoint(ctx: JobContext):
 
     agent = SceneRouter()
     agent.room = ctx.room  # tools publish via this
-
-    # When the browser finishes an iterate PREVIEW image and shows it, it sends us
-    # a `preview_ready` over the same data topic. We ask for approval ONLY now —
-    # so the spoken "want me to build it?" lands after the image is on screen, not
-    # before. Kept in chat ctx so the model knows it asked and can route the user's
-    # yes/no to approve_build / cancel_build.
-    @ctx.room.on("data_received")
-    def _on_browser_data(packet) -> None:  # noqa: ANN001
-        if getattr(packet, "topic", None) != DATA_TOPIC:
-            return
-        try:
-            msg = json.loads(bytes(packet.data).decode("utf-8"))
-        except Exception:
-            return
-        if msg.get("type") == "preview_ready":
-            subject = msg.get("subject") or "the change"
-            agent._say(session, f"Here's {subject}. Want me to build it?", add_to_chat_ctx=True, limit=100)
 
     # Default close_on_disconnect=True: when the participant leaves (toggle off /
     # reload), close the session so this job ends and the room is recycled. The

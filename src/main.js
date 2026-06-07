@@ -220,11 +220,6 @@ scene.add(controls.getObject ? controls.getObject() : camera); // r181: controls
 
 const lockHint = document.getElementById('lock-hint');
 const crosshair = document.getElementById('crosshair');
-const previewPanel = document.getElementById('preview-panel');
-const previewImg = document.getElementById('preview-img');
-const previewCtx = document.getElementById('preview-ctx');
-const previewApprove = document.getElementById('preview-approve');
-const previewReject = document.getElementById('preview-reject');
 
 const keys = { forward: false, back: false, left: false, right: false, up: false, down: false };
 const velocity = new THREE.Vector3();
@@ -882,111 +877,53 @@ async function generateAt(prompt, placement) {
   }
 }
 
-// ── Iterate with an approval gate ──────────────────────────────────────────
-// Iterating is two-phase: first we generate the cheap Gemini PREVIEW image and
-// show it for approval; only once approved do we run the slow (1-2 min) mesh
-// build. The voice agent narrates this — it asks "build it?" once the preview is
-// on screen — but the popup's buttons work as a fallback. While a preview is
-// pending, another instruction REVISES it (refines from the pending image) so
-// successive tweaks compound without ever building a throwaway mesh.
-let pendingIterate = null; // { id, oldRoot, image, prompt, instruction, placement, sizeMeters }
-
-function showPreviewPanel(image, ctxText) {
-  previewImg.src = image;
-  previewCtx.textContent = ctxText;
-  previewPanel.classList.remove('hidden', 'busy');
-}
-function hidePreviewPanel() {
-  previewPanel.classList.add('hidden', 'busy');
-  previewImg.removeAttribute('src');
-}
-
-// Phase 1: build the preview image (or revise the pending one) and show it.
-async function startIteratePreview(id, instruction) {
+// ── Iterate (build immediately, no approval gate) ──────────────────────────
+// One spoken change = one rebuild: generate the edited Gemini image, build the
+// mesh, and swap it in place (same world position and real-world size). The old
+// model is ghosted while we work. The agent asks a clarifying question first
+// only when the instruction is too vague to act on — otherwise it just builds.
+async function iterateOn(id, instruction) {
   const entry = store.get(id);
   if (!entry || !instruction) return;
   const placement = entry.placement.position.clone();
   const oldRoot = entry.root;
-  // Revising an already-pending preview of THIS object → refine from the pending
-  // image so "bigger" then "bluer" yields bigger AND bluer. Otherwise start from
-  // the live model's source image and ghost the model while we preview.
-  const revising = pendingIterate && pendingIterate.id === id;
-  const sourceImage = revising ? pendingIterate.image : entry.sourceImage;
-  const basePrompt = revising ? pendingIterate.prompt : entry.prompt;
-  if (!revising) makeLoadingGhost(oldRoot);
+  makeLoadingGhost(oldRoot);
+  let ghosted = true;
   toast(`Re-imagining: “${instruction}”…`, true);
   try {
-    const img = await iterateImage({ sourceImage, prompt: basePrompt, instruction });
-    pendingIterate = {
-      id, oldRoot,
-      image: img.image,
-      prompt: img.prompt || instruction,
+    const img = await iterateImage({
+      sourceImage: entry.sourceImage,
+      prompt: entry.prompt,
       instruction,
-      placement,
-      sizeMeters: entry.sizeMeters,
-    };
-    showPreviewPanel(img.image, `“${instruction}” — build this?`);
-    toast('Preview ready — approve to build', false, 2600);
-    voice.send({ type: 'preview_ready', mode: 'iterate', subject: instruction });
-  } catch (err) {
-    if (!revising) clearLoadingGhost(oldRoot);
-    pendingIterate = null;
-    hidePreviewPanel();
-    console.error(err);
-    toast(`Iterate failed: ${err.message}`, false, 4500);
-  }
-}
-
-// Phase 2: the user approved → run the slow mesh build and swap the model in.
-async function approveIterate() {
-  const p = pendingIterate;
-  if (!p) return;
-  pendingIterate = null;
-  previewPanel.classList.add('busy');
-  toast('Building 3D model…', true);
-  const oldRoot = p.oldRoot;
-  try {
-    const result = await imageToModel({ image: p.image, prompt: p.prompt });
+    });
+    toast('Building 3D model…', true);
+    const result = await imageToModel({ image: img.image, prompt: img.prompt || instruction });
     // Swap in place — keep world position AND the same real-world size.
-    const newRoot = await loadModelAt(result.modelUrl, p.placement, p.sizeMeters);
-    newRoot.userData.objectId = p.id;
+    const newRoot = await loadModelAt(result.modelUrl, placement, entry.sizeMeters);
+    newRoot.userData.objectId = id;
 
     loadingPlaceholders.delete(oldRoot);
+    ghosted = false;
     scene.remove(oldRoot);
     disposeObject(oldRoot);
     const idx = selectables.indexOf(oldRoot);
     if (idx >= 0) selectables.splice(idx, 1);
     selectables.push(newRoot);
 
-    const entry = store.get(p.id);
-    store.update(p.id, {
+    store.update(id, {
       root: newRoot,
       sourceImage: result.image,
-      prompt: result.prompt || p.instruction,
-      history: [...(entry?.history || []), { instruction: p.instruction, prompt: result.prompt || p.instruction, image: result.image }],
+      prompt: result.prompt || instruction,
+      history: [...entry.history, { instruction, prompt: result.prompt || instruction, image: result.image }],
     });
-    if (selectedId === p.id) { selectedId = null; setSelected(p.id); } // re-apply highlight
-    hidePreviewPanel();
+    if (selectedId === id) { selectedId = null; setSelected(id); } // re-apply highlight
     toast('Object updated', false, 1800);
   } catch (err) {
-    clearLoadingGhost(oldRoot); // restore the real model on failure
-    hidePreviewPanel();
+    if (ghosted) clearLoadingGhost(oldRoot); // restore the real model on failure
     console.error(err);
-    toast(`Build failed: ${err.message}`, false, 4500);
+    toast(`Iterate failed: ${err.message}`, false, 4500);
   }
 }
-
-// The user rejected the preview → discard it and restore the original model.
-function cancelIterate() {
-  if (!pendingIterate) return;
-  clearLoadingGhost(pendingIterate.oldRoot);
-  pendingIterate = null;
-  hidePreviewPanel();
-  toast('Change discarded', false, 1800);
-}
-
-previewApprove.addEventListener('click', () => approveIterate());
-previewReject.addEventListener('click', () => cancelIterate());
 
 // ─────────────────────────────────────────────────────────────────────────
 //  Lighting layer (natural-language → live scene lighting)
@@ -1398,23 +1335,15 @@ function handleVoiceCommand(msg) {
       break;
     }
     case 'iterate': {
-      // While a preview is pending, a new instruction revises THAT object even if
-      // focus drifted — so "make it bluer" during approval refines the preview.
-      const id = pendingIterate ? pendingIterate.id : (selectedId || hoverObjectId);
+      const id = selectedId || hoverObjectId;
       if (!id) { toast('Look at or select an object first', false, 2600); break; }
       const instruction = msg.instruction || '';
       const key = `iterate:${id}:${instruction.toLowerCase().trim()}`;
       if (isDuplicateCommand(key)) { console.warn('[voice] ignored duplicate iterate:', instruction); break; }
       setSelected(id);
-      runOnce(key, startIteratePreview(id, instruction));
+      runOnce(key, iterateOn(id, instruction)); // builds immediately, no approval gate
       break;
     }
-    case 'approve_build': // user OK'd the preview → run the slow mesh build
-      approveIterate();
-      break;
-    case 'cancel_build':  // user rejected the preview → discard it
-      cancelIterate();
-      break;
     case 'lighting': {
       const description = msg.description || '';
       const key = `lighting:${description.toLowerCase().trim()}`;
