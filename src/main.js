@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { installMeshyLighting } from './lighting.js';
-import { generateImage, iterateImage, imageToModel, setLighting } from './pipeline.js';
+import { generateImage, iterateImage, imageToModel, setLighting, estimateSize } from './pipeline.js';
 import * as store from './store.js';
 import { createVoice } from './voice.js';
 
@@ -11,6 +11,8 @@ import { createVoice } from './voice.js';
 // ─────────────────────────────────────────────────────────────────────────
 const EYE_HEIGHT = 1.6;        // human eye height (units = meters)
 const MOVE_SPEED = 4.0;        // m/s
+const FLY_SPEED = 5.0;         // vertical m/s (Up/Down arrows)
+const GRAVITY = 22.0;          // m/s² while walking (fall onto the surface below)
 const ROOM = { size: 24, height: 4.2 };
 const HALF = ROOM.size / 2;
 const WALL_PAD = 0.7;          // keep the camera off the walls
@@ -33,7 +35,7 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 app.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x1a1a1f);
+scene.background = new THREE.Color(0x000000);
 
 const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 200);
 camera.position.set(0, EYE_HEIGHT, 6);
@@ -43,8 +45,10 @@ const lights = installMeshyLighting(scene, renderer, { castShadows: true });
 // ─────────────────────────────────────────────────────────────────────────
 //  Room  (basic box: floor, ceiling, 4 walls)
 // ─────────────────────────────────────────────────────────────────────────
-const collidables = [];   // surfaces the crosshair can place objects on
-const selectables = [];   // generated model roots the crosshair can select
+const collidables = [];     // surfaces the crosshair can place objects on
+const selectables = [];     // generated model roots the crosshair can select
+const flatRoomMeshes = [];  // the basic box — kept invisible as collision/bounds + fallback
+let flyCeiling = ROOM.height; // how high you can fly; raised to the loaded scene's height
 
 function buildRoom() {
   const wallMat = new THREE.MeshStandardMaterial({ color: 0x3a3d44, roughness: 0.92, metalness: 0.0 });
@@ -89,8 +93,85 @@ function buildRoom() {
   grid.material.opacity = 0.35;
   grid.material.transparent = true;
   scene.add(grid);
+
+  // The flat box is hidden by default — it stays only as invisible collision /
+  // placement geometry and clamp bounds, and as a fallback if the environment
+  // GLB fails to load. The loaded scene below is what you actually see.
+  flatRoomMeshes.push(floor, ceil, grid, ...collidables.filter((c) => c.userData.surface === 'wall'));
+  for (const m of flatRoomMeshes) m.visible = false;
 }
 buildRoom();
+
+// The dungeon's materials are baked (originally KHR_materials_unlit, which we
+// stripped so emissive survives). Render each one self-illuminated from its
+// texture so it shows at full baked brightness with NO dependence on the studio
+// rig: normal surfaces emit their baseColor; black-based additive effects
+// (the water / glow props) emit their emissive map instead. baseColor stays as
+// `map` so alpha-tested / blended materials keep their cutouts.
+function bakedUnlit(m) {
+  if (!m) return;
+  m.toneMapped = false;      // baked colors at face value
+  m.envMapIntensity = 0;     // ignore the studio HDR; the dungeon is self-lit
+  // Render UNLIT base + ADD the emissive glow (torches, water, runes) with no
+  // dependence on scene lights: push the sampled baseColor into the emissive
+  // term (which already holds emissive*emissiveMap), then zero the diffuse the
+  // lights would use so nothing gets double-lit. Alpha (diffuseColor.a) is kept.
+  m.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <emissivemap_fragment>',
+      `#include <emissivemap_fragment>
+\ttotalEmissiveRadiance += diffuseColor.rgb;
+\tdiffuseColor.rgb = vec3( 0.0 );`,
+    );
+  };
+  m.needsUpdate = true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  Environment scene — load a GLB world (the dungeon) in place of the flat
+//  room. Fitted to the room footprint, floor seated on y=0, centered, and its
+//  meshes registered as collidables so you can place objects on its surfaces.
+// ─────────────────────────────────────────────────────────────────────────
+function loadEnvironment(url) {
+  // Local loader: the shared gltfLoader const is declared further down the file.
+  new GLTFLoader().load(
+    url,
+    (gltf) => {
+      const env = gltf.scene || (gltf.scenes && gltf.scenes[0]);
+      if (!env) return;
+      // Fit the longest horizontal axis into the room footprint, seat on floor.
+      env.updateMatrixWorld(true);
+      let box = new THREE.Box3().setFromObject(env);
+      const size = new THREE.Vector3(); box.getSize(size);
+      const maxXZ = Math.max(size.x, size.z) || 1;
+      env.scale.setScalar((ROOM.size * 0.92) / maxXZ);
+      env.updateMatrixWorld(true);
+      box = new THREE.Box3().setFromObject(env);
+      const c = new THREE.Vector3(); box.getCenter(c);
+      env.position.x -= c.x;            // center horizontally on the origin
+      env.position.z -= c.z;
+      env.position.y -= box.min.y;      // seat the floor on y = 0
+      flyCeiling = Math.max(ROOM.height, box.max.y - box.min.y); // let you fly up to its roof
+      env.traverse((o) => {
+        if (!o.isMesh) return;
+        o.receiveShadow = true;
+        o.castShadow = true;
+        o.userData.surface = 'environment';
+        collidables.push(o);            // let the crosshair place objects on it
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        mats.forEach(bakedUnlit);
+      });
+      env.userData._environment = true;
+      scene.add(env);
+    },
+    undefined,
+    (err) => {
+      console.error('[environment] load failed:', err);
+      for (const m of flatRoomMeshes) m.visible = true; // fall back to the flat room
+    },
+  );
+}
+loadEnvironment('/dungeon_crossroads.glb');
 
 // ─────────────────────────────────────────────────────────────────────────
 //  First-person controls
@@ -101,9 +182,53 @@ scene.add(controls.getObject ? controls.getObject() : camera); // r181: controls
 const lockHint = document.getElementById('lock-hint');
 const crosshair = document.getElementById('crosshair');
 
-const keys = { forward: false, back: false, left: false, right: false };
+const keys = { forward: false, back: false, left: false, right: false, up: false, down: false };
 const velocity = new THREE.Vector3();
 const direction = new THREE.Vector3();
+
+// Movement mode: fly freely (↑/↓ arrows) or walk grounded (snap to the surface
+// beneath you). Double-tap Space toggles — so after flying inside the model you
+// can drop onto the floor and walk it.
+let walkMode = false;
+let lastSpacePress = 0;
+const groundRay = new THREE.Raycaster();
+const DOWN_VEC = new THREE.Vector3(0, -1, 0);
+function toggleWalkMode() {
+  walkMode = !walkMode;
+  velocity.y = 0; // start from rest
+  if (walkMode) {
+    // Drop to the LOWEST floor beneath you (the hallway ground), passing through
+    // any roof/overhang above it — so you end up INSIDE the model, not on top.
+    groundRay.set(camera.position.clone(), DOWN_VEC);
+    groundRay.far = 4000;
+    const hits = groundRay.intersectObjects(collidables, true);
+    if (hits.length) camera.position.y = hits[hits.length - 1].point.y + EYE_HEIGHT;
+  }
+  toast(walkMode
+    ? 'Walking the hallway — double-tap Space to fly'
+    : 'Flying — ↑/↓ to rise & descend, double-tap Space to walk', false, 2600);
+}
+
+// Solid walls: block horizontal movement that would pass into the dungeon
+// geometry. Resolved per-axis (X then Z) so you slide along walls instead of
+// sticking. prevX/prevZ are the position before this frame's move.
+const collideRay = new THREE.Raycaster();
+const PLAYER_RADIUS = 0.45;
+function resolveWallCollision(prevX, prevZ) {
+  const y = camera.position.y;
+  const dx = camera.position.x - prevX;
+  if (Math.abs(dx) > 1e-4) {
+    collideRay.set(new THREE.Vector3(prevX, y, prevZ), new THREE.Vector3(Math.sign(dx), 0, 0));
+    collideRay.far = Math.abs(dx) + PLAYER_RADIUS;
+    if (collideRay.intersectObjects(collidables, true).length) camera.position.x = prevX;
+  }
+  const dz = camera.position.z - prevZ;
+  if (Math.abs(dz) > 1e-4) {
+    collideRay.set(new THREE.Vector3(camera.position.x, y, prevZ), new THREE.Vector3(0, 0, Math.sign(dz)));
+    collideRay.far = Math.abs(dz) + PLAYER_RADIUS;
+    if (collideRay.intersectObjects(collidables, true).length) camera.position.z = prevZ;
+  }
+}
 
 controls.addEventListener('lock', () => {
   lockHint.classList.add('hidden');
@@ -115,7 +240,7 @@ controls.addEventListener('unlock', () => {
   // Esc while carrying → cancel the move, snapping the object back.
   if (grabbedId) cancelGrab();
   // Released → drop movement so we don't keep gliding.
-  keys.forward = keys.back = keys.left = keys.right = false;
+  keys.forward = keys.back = keys.left = keys.right = keys.up = keys.down = false;
 });
 
 lockHint.addEventListener('click', () => controls.lock());
@@ -127,26 +252,43 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'BracketLeft') { resizeSelected(1 / 1.1); return; }   // [ smaller
   if (e.code === 'KeyG') { toggleGrab(); return; }
   if (e.code === 'KeyV') { voiceEl.click(); return; }
+  if (e.code === 'Space') {
+    e.preventDefault();
+    const now = performance.now();
+    if (now - lastSpacePress < 350) toggleWalkMode(); // double-tap
+    lastSpacePress = now;
+    return;
+  }
   switch (e.code) {
-    case 'KeyW': case 'ArrowUp': keys.forward = true; break;
-    case 'KeyS': case 'ArrowDown': keys.back = true; break;
+    case 'KeyW': keys.forward = true; break;
+    case 'KeyS': keys.back = true; break;
     case 'KeyA': case 'ArrowLeft': keys.left = true; break;
     case 'KeyD': case 'ArrowRight': keys.right = true; break;
+    case 'ArrowUp': keys.up = true; break;     // fly up
+    case 'ArrowDown': keys.down = true; break; // fly down
   }
 });
 window.addEventListener('keyup', (e) => {
   switch (e.code) {
-    case 'KeyW': case 'ArrowUp': keys.forward = false; break;
-    case 'KeyS': case 'ArrowDown': keys.back = false; break;
+    case 'KeyW': keys.forward = false; break;
+    case 'KeyS': keys.back = false; break;
     case 'KeyA': case 'ArrowLeft': keys.left = false; break;
     case 'KeyD': case 'ArrowRight': keys.right = false; break;
+    case 'ArrowUp': keys.up = false; break;
+    case 'ArrowDown': keys.down = false; break;
   }
 });
 
-// Scroll wheel resizes the object you're aiming at / carrying (up = bigger).
-// Only hijacks the wheel when an object is targeted, so normal scroll is intact.
+// Scroll wheel: while carrying, push/pull the held object nearer/farther (so you
+// can move it through the whole depth of the room); otherwise resize the object
+// you're aiming at (up = bigger). Only hijacks the wheel when relevant.
 window.addEventListener('wheel', (e) => {
-  const id = grabbedId || selectedId || hoverObjectId;
+  if (grabbedId) {
+    e.preventDefault();
+    carryDistance = clampCarry(carryDistance * (e.deltaY < 0 ? 1.1 : 1 / 1.1)); // up = farther
+    return;
+  }
+  const id = selectedId || hoverObjectId;
   if (!id || !store.get(id)) return;
   e.preventDefault();
   resizeSelected(e.deltaY < 0 ? 1.1 : 1 / 1.1);
@@ -231,7 +373,9 @@ function applyHighlight(root, on) {
 //  Grab-to-move (carry the object on the crosshair, then click to place)
 // ─────────────────────────────────────────────────────────────────────────
 let grabbedId = null;
-let grabOriginal = null; // original position, for Esc-cancel
+let grabOriginal = null;   // original position, for Esc-cancel
+let carryDistance = 3;     // how far in front of the camera the held object floats (m)
+const clampCarry = (d) => Math.max(0.8, Math.min(16, d));
 
 function toggleGrab() {
   if (grabbedId) { dropGrab(true); return; }
@@ -239,24 +383,35 @@ function toggleGrab() {
   if (!id || !store.get(id)) return;
   grabbedId = id;
   setSelected(id);
-  grabOriginal = store.get(id).root.position.clone();
+  const root = store.get(id).root;
+  grabOriginal = root.position.clone();
+  // Pick up at the object's current distance so it doesn't jump toward you.
+  root.updateMatrixWorld(true);
+  const c = new THREE.Box3().setFromObject(root).getCenter(new THREE.Vector3());
+  carryDistance = clampCarry(c.distanceTo(camera.position));
   crosshair.classList.add('carrying');
-  toast('Carrying — move with the mouse, click to place, Esc to cancel', false, 2800);
+  toast('Carrying — aim to move it anywhere, scroll to push/pull, click to place, Esc to cancel', false, 3200);
 }
 
-// Each frame while carrying: seat the object's base on the surface under the crosshair.
+// Each frame while carrying: float the object in FREE SPACE in front of the
+// camera along the look direction, so you can place it anywhere — high, low, or
+// across the room — by aiming and pushing/pulling with the scroll wheel. Kept
+// inside the walls (x/z) and between floor and ceiling (y).
 function grabUpdate() {
   const entry = store.get(grabbedId);
   if (!entry) { grabbedId = null; return; }
-  const p = (groundHoverPoint ? groundHoverPoint.clone() : groundPointAhead());
-  clampToRoom(p);
   const root = entry.root;
+  const fwd = new THREE.Vector3();
+  camera.getWorldDirection(fwd);
+  const target = camera.position.clone().add(fwd.multiplyScalar(carryDistance));
+  clampToRoom(target); // walls (x/z)
   root.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(root);
+  const size = new THREE.Vector3(); box.getSize(size);
+  const halfH = size.y / 2;
+  target.y = Math.max(halfH, Math.min(ROOM.height - halfH, target.y)); // floor↔ceiling
   const c = new THREE.Vector3(); box.getCenter(c);
-  root.position.x += p.x - c.x;
-  root.position.z += p.z - c.z;
-  root.position.y += p.y - box.min.y;
+  root.position.add(target.sub(c)); // shift the object's center onto the target point
 }
 
 function dropGrab(commit) {
@@ -443,12 +598,17 @@ async function generateAt(prompt, placement) {
   // Animated wireframe box stands in for the whole generation.
   let ph = addBoxPlaceholder(placement);
   toast(`Imagining “${prompt}”…`, true);
+  // Fire the size estimate immediately, in parallel with the whole image→mesh
+  // pipeline. It's a fast call that resolves long before the slow mesh build
+  // finishes, so the result is ready for free by the time we load the model.
+  const sizePromise = estimateSize({ prompt }).then((r) => r && r.sizeMeters).catch(() => null);
   try {
     const img = await generateImage({ prompt });
     toast('Building 3D model…', true);
     const result = await imageToModel({ image: img.image, prompt: img.prompt || prompt });
     const id = store.nextId();
-    const sizeMeters = Number.isFinite(img.sizeMeters) ? img.sizeMeters : MODEL_TARGET_SIZE;
+    const est = await sizePromise;
+    const sizeMeters = Number.isFinite(est) ? est : MODEL_TARGET_SIZE;
     const root = await loadModelAt(result.modelUrl, placement, sizeMeters);
     removePlaceholder(ph); ph = null; // remove only after the mesh is in place
     root.userData.objectId = id;
@@ -757,11 +917,29 @@ function animate() {
     if (keys.forward || keys.back) velocity.z -= direction.z * MOVE_SPEED * 10 * dt;
     if (keys.left || keys.right) velocity.x -= direction.x * MOVE_SPEED * 10 * dt;
 
+    const prevX = camera.position.x, prevZ = camera.position.z;
     controls.moveRight(-velocity.x * dt);
     controls.moveForward(-velocity.z * dt);
+    resolveWallCollision(prevX, prevZ); // walls are solid — no walking through them
 
-    // Stay grounded + inside the room.
-    camera.position.y = EYE_HEIGHT;
+    if (walkMode) {
+      // Walk grounded: fall from where you are (gravity) and stop when your feet
+      // meet the surface below — so you land INSIDE the model, never lifted onto
+      // the top. The flat floor (y=0) is a collidable backstop.
+      velocity.y -= GRAVITY * dt;
+      camera.position.y += velocity.y * dt;
+      groundRay.set(camera.position, DOWN_VEC);
+      groundRay.far = 1000;
+      const hit = groundRay.intersectObjects(collidables, true)[0];
+      const floorY = hit ? hit.point.y + EYE_HEIGHT : 0.4;
+      if (camera.position.y <= floorY) { camera.position.y = floorY; velocity.y = 0; }
+    } else {
+      // Fly with the Up/Down arrows; otherwise hold the current height.
+      if (keys.up) camera.position.y += FLY_SPEED * dt;
+      if (keys.down) camera.position.y -= FLY_SPEED * dt;
+      velocity.y = 0;
+    }
+    camera.position.y = Math.max(0.4, Math.min(flyCeiling - 0.3, camera.position.y));
     clampToRoom(camera.position);
 
     updateCrosshair();

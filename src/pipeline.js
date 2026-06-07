@@ -48,6 +48,17 @@ export async function generateImage({ prompt }) {
 }
 
 /**
+ * SIZE — prompt → estimated real-world longest-axis size in meters (fast LLM).
+ * Fired at the start of a generate so it overlaps the slow mesh build and costs
+ * no extra wall-clock time. Resolves to null on failure (caller falls back).
+ * @param {{ prompt: string }} args
+ * @returns {Promise<{ sizeMeters: number|null }>}
+ */
+export async function estimateSize({ prompt }) {
+  return postJSON('/api/size', { prompt });
+}
+
+/**
  * STEP 1b — ITERATE IMAGE: stored source image + instruction → Gemini edit (fast).
  * The prior image is passed as context so the result is a variation.
  * @param {{ sourceImage: string, prompt: string, instruction: string }} args
