@@ -112,7 +112,8 @@
       <div class="title">Click to enter</div>
       <div class="keys">
         <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / arrows to walk &nbsp;·&nbsp; mouse to look<br />
-        <kbd>Left-click</kbd> an object to iterate &nbsp;·&nbsp; <kbd>Right-click</kbd> the ground to generate &nbsp;·&nbsp; <kbd>Esc</kbd> to release
+        <kbd>Left-click</kbd> an object to iterate &nbsp;·&nbsp; <kbd>Right-click</kbd> the ground to generate<br />
+        <kbd>L</kbd> to change the lighting &nbsp;·&nbsp; <kbd>Esc</kbd> to release
       </div>
     </div>
 
@@ -137,6 +138,17 @@
       <div class="row">
         <button id="iterate-cancel" class="ghost">Close</button>
         <button id="iterate-go" class="primary">Iterate</button>
+      </div>
+    </div>
+
+    <!-- Lighting control -->
+    <div id="lighting-panel" class="panel hidden">
+      <div class="label">Lighting</div>
+      <div class="ctx">Describe the lighting you want — e.g. “warm sunset”, “dim and moody”, “bright studio”, “cool blue night”.</div>
+      <textarea id="lighting-input" placeholder="Describe the lighting…" rows="2"></textarea>
+      <div class="row">
+        <button id="lighting-cancel" class="ghost">Cancel</button>
+        <button id="lighting-go" class="primary">Apply</button>
       </div>
     </div>
 

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { installMeshyLighting } from './lighting.js';
-import { generateObject, iterateObject } from './pipeline.js';
+import { generateObject, iterateObject, setLighting } from './pipeline.js';
 import * as store from './store.js';
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -37,7 +37,7 @@ scene.background = new THREE.Color(0x1a1a1f);
 const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 200);
 camera.position.set(0, EYE_HEIGHT, 6);
 
-installMeshyLighting(scene, renderer, { castShadows: true });
+const lights = installMeshyLighting(scene, renderer, { castShadows: true });
 
 // ─────────────────────────────────────────────────────────────────────────
 //  Room  (basic box: floor, ceiling, 4 walls)
@@ -126,6 +126,7 @@ lockHint.addEventListener('click', () => {
 
 window.addEventListener('keydown', (e) => {
   if (menuOpen) return; // let the panel inputs handle typing
+  if (e.code === 'KeyL') { openLightingPanel(); return; }
   switch (e.code) {
     case 'KeyW': case 'ArrowUp': keys.forward = true; break;
     case 'KeyS': case 'ArrowDown': keys.back = true; break;
@@ -267,6 +268,11 @@ const itCtx = document.getElementById('iterate-ctx');
 const itGo = document.getElementById('iterate-go');
 const itCancel = document.getElementById('iterate-cancel');
 
+const lightPanel = document.getElementById('lighting-panel');
+const lightInput = document.getElementById('lighting-input');
+const lightGo = document.getElementById('lighting-go');
+const lightCancel = document.getElementById('lighting-cancel');
+
 let pendingPlacement = null; // world point captured at right-click time
 
 function openPanel(panel, input) {
@@ -280,6 +286,7 @@ function openPanel(panel, input) {
 function closePanels(relock = true) {
   genPanel.classList.add('hidden');
   itPanel.classList.add('hidden');
+  lightPanel.classList.add('hidden');
   menuOpen = false;
   if (relock) controls.lock();
   else lockHint.classList.remove('hidden');
@@ -301,14 +308,21 @@ function openIteratePanel(id) {
   openPanel(itPanel, itInput);
 }
 
+function openLightingPanel() {
+  lightInput.value = '';
+  openPanel(lightPanel, lightInput);
+}
+
 genCancel.addEventListener('click', () => closePanels(true));
 itCancel.addEventListener('click', () => { setSelected(null); closePanels(true); });
+lightCancel.addEventListener('click', () => closePanels(true));
 
 genGo.addEventListener('click', runGenerate);
 itGo.addEventListener('click', runIterate);
+lightGo.addEventListener('click', runLighting);
 
 // Submit on Enter (Shift+Enter = newline); Esc closes a panel.
-for (const [input, run] of [[genInput, runGenerate], [itInput, runIterate]]) {
+for (const [input, run] of [[genInput, runGenerate], [itInput, runIterate], [lightInput, runLighting]]) {
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); run(); }
     else if (e.key === 'Escape') { e.preventDefault(); setSelected(null); closePanels(true); }
@@ -386,6 +400,64 @@ async function runIterate() {
   } catch (err) {
     console.error(err);
     toast(`Iterate failed: ${err.message}`, false, 4500);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  Lighting layer (natural-language → live scene lighting)
+// ─────────────────────────────────────────────────────────────────────────
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+// Snapshot the current rig so relative requests ("warmer", "a bit dimmer") work.
+function currentLighting() {
+  return {
+    keyColor: '#' + lights.keyLight.color.getHexString(),
+    keyIntensity: lights.keyLight.intensity,
+    fillColor: '#' + lights.fillLight.color.getHexString(),
+    fillIntensity: lights.fillLight.intensity,
+    rimColor: '#' + lights.rimLight.color.getHexString(),
+    rimIntensity: lights.rimLight.intensity,
+    ambientIntensity: lights.ambientLight.intensity,
+    hemiSky: '#' + lights.hemisphereLight.color.getHexString(),
+    hemiGround: '#' + lights.hemisphereLight.groundColor.getHexString(),
+    hemiIntensity: lights.hemisphereLight.intensity,
+    environmentIntensity: scene.environmentIntensity,
+    exposure: renderer.toneMappingExposure,
+    background: '#' + scene.background.getHexString(),
+  };
+}
+
+// Apply a full (or partial) rig config to the live scene, clamped to sane ranges.
+function applyLighting(cfg) {
+  const setColor = (target, hex) => { if (typeof hex === 'string') target.set(hex); };
+  setColor(lights.keyLight.color, cfg.keyColor);
+  setColor(lights.fillLight.color, cfg.fillColor);
+  setColor(lights.rimLight.color, cfg.rimColor);
+  setColor(lights.hemisphereLight.color, cfg.hemiSky);
+  setColor(lights.hemisphereLight.groundColor, cfg.hemiGround);
+  setColor(scene.background, cfg.background);
+  if (Number.isFinite(cfg.keyIntensity)) lights.keyLight.intensity = clamp(cfg.keyIntensity, 0, 5);
+  if (Number.isFinite(cfg.fillIntensity)) lights.fillLight.intensity = clamp(cfg.fillIntensity, 0, 5);
+  if (Number.isFinite(cfg.rimIntensity)) lights.rimLight.intensity = clamp(cfg.rimIntensity, 0, 5);
+  if (Number.isFinite(cfg.ambientIntensity)) lights.ambientLight.intensity = clamp(cfg.ambientIntensity, 0, 2);
+  if (Number.isFinite(cfg.hemiIntensity)) lights.hemisphereLight.intensity = clamp(cfg.hemiIntensity, 0, 2);
+  if (Number.isFinite(cfg.environmentIntensity)) scene.environmentIntensity = clamp(cfg.environmentIntensity, 0, 3);
+  if (Number.isFinite(cfg.exposure)) renderer.toneMappingExposure = clamp(cfg.exposure, 0.1, 3);
+}
+
+async function runLighting() {
+  const prompt = lightInput.value.trim();
+  if (!prompt) { lightInput.focus(); return; }
+  closePanels(true);
+
+  toast(`Lighting: “${prompt}”…`, true);
+  try {
+    const cfg = await setLighting({ prompt, current: currentLighting() });
+    applyLighting(cfg);
+    toast(cfg.summary ? `Lighting: ${cfg.summary}` : 'Lighting updated', false, 2200);
+  } catch (err) {
+    console.error(err);
+    toast(`Lighting failed: ${err.message}`, false, 4500);
   }
 }
 

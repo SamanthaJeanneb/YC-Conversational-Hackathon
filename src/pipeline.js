@@ -53,3 +53,14 @@ export async function generateObject({ prompt }) {
 export async function iterateObject({ sourceImage, prompt, instruction }) {
   return postJSON('/api/iterate', { sourceImage, prompt, instruction });
 }
+
+/**
+ * LIGHTING — natural-language request + current rig state → full target rig.
+ * A thin interpretation layer (Gemini) that maps intent onto the scene's
+ * concrete lighting knobs. Returns the complete resulting state to apply.
+ * @param {{ prompt: string, current: object }} args
+ * @returns {Promise<object>} full lighting config (see server LIGHTING_SCHEMA)
+ */
+export async function setLighting({ prompt, current }) {
+  return postJSON('/api/lighting', { prompt, current });
+}

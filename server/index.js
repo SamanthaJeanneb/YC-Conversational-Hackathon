@@ -15,7 +15,7 @@ import dotenv from 'dotenv';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 import Replicate from 'replicate';
 
 // Load the existing Suzanne config first, then any local .env on top.
@@ -177,6 +177,69 @@ app.post('/api/iterate', async (req, res) => {
     res.json({ modelUrl, image, prompt: effectivePrompt });
   } catch (e) {
     console.error('[iterate] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// LIGHTING: natural-language request + current rig state -> full target rig.
+// A thin interpretation layer — Gemini maps intent ("warm sunset", "dim and
+// moody") onto the Meshy lighting rig's concrete knobs. Returns the COMPLETE
+// resulting state so the client can apply it deterministically.
+const LIGHTING_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    keyColor: { type: Type.STRING },          // hex, e.g. "#fff4e0"
+    keyIntensity: { type: Type.NUMBER },       // 0..5
+    fillColor: { type: Type.STRING },
+    fillIntensity: { type: Type.NUMBER },      // 0..5
+    rimColor: { type: Type.STRING },
+    rimIntensity: { type: Type.NUMBER },       // 0..5
+    ambientIntensity: { type: Type.NUMBER },   // 0..2
+    hemiSky: { type: Type.STRING },
+    hemiGround: { type: Type.STRING },
+    hemiIntensity: { type: Type.NUMBER },      // 0..2
+    environmentIntensity: { type: Type.NUMBER },// 0..3
+    exposure: { type: Type.NUMBER },           // 0.1..3
+    background: { type: Type.STRING },         // room background hex
+    summary: { type: Type.STRING },            // short human label
+  },
+  required: [
+    'keyColor', 'keyIntensity', 'fillColor', 'fillIntensity', 'rimColor',
+    'rimIntensity', 'ambientIntensity', 'hemiSky', 'hemiGround', 'hemiIntensity',
+    'environmentIntensity', 'exposure', 'background', 'summary',
+  ],
+};
+
+app.post('/api/lighting', async (req, res) => {
+  const prompt = (req.body?.prompt || '').trim();
+  const current = req.body?.current || {};
+  if (!prompt) return res.status(400).json({ error: 'prompt required' });
+  if (!ai) return res.status(500).json({ error: 'GEMINI_API_KEY not configured' });
+  try {
+    console.log(`[lighting] "${prompt}"`);
+    const instruction =
+      `You control a three.js studio lighting rig. Starting from the CURRENT ` +
+      `state below, return the COMPLETE resulting state, changing ONLY what the ` +
+      `request implies and leaving everything else equal to the current value.\n\n` +
+      `Rig: key (main directional, warm by default), fill (soft secondary), rim ` +
+      `(back/edge highlight — the silhouette "shine"), ambient (flat lift), ` +
+      `hemisphere (sky/ground gradient fill), environmentIntensity (HDR ` +
+      `reflection strength), exposure (overall brightness, tone mapping), ` +
+      `background (room color behind everything).\n` +
+      `Sane ranges: key/fill/rim 0..5, ambient/hemi 0..2, environmentIntensity ` +
+      `0..3, exposure 0.1..3. Colors are hex strings. Warmer = toward orange; ` +
+      `cooler = toward blue. "dim/moody" lowers intensities + exposure; ` +
+      `"bright/studio" raises them.\n\n` +
+      `CURRENT: ${JSON.stringify(current)}\n\nREQUEST: ${prompt}`;
+    const resp = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: instruction,
+      config: { responseMimeType: 'application/json', responseSchema: LIGHTING_SCHEMA, temperature: 0.4 },
+    });
+    const cfg = JSON.parse(resp.text);
+    res.json(cfg);
+  } catch (e) {
+    console.error('[lighting] error:', e);
     res.status(500).json({ error: e.message });
   }
 });
