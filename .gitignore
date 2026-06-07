@@ -10,3 +10,7 @@ voice/.venv/
 __pycache__/
 *.pyc
 voice/.env
+
+# Large 3D outputs (Gaussian splats / point clouds) — not versioned
+*.ply
+*.spz
