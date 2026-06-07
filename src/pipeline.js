@@ -34,24 +34,36 @@ async function postJSON(path, body) {
   return res.json();
 }
 
+// The pipeline is split into two steps so the front end can show the Gemini
+// image as a fast shape-preview placeholder (~seconds) while the much slower
+// Hunyuan 3.1 mesh (~1-2 min) builds from that SAME image (no double work).
+
 /**
- * GENERATE — text prompt → Gemini image → Hunyuan 3.1 GLB.
+ * STEP 1a — GENERATE IMAGE: text prompt → Gemini image (fast).
  * @param {{ prompt: string }} args
- * @returns {Promise<{ modelUrl: string, image: string, prompt: string }>}
+ * @returns {Promise<{ image: string, prompt: string }>}  image is a data-URI
  */
-export async function generateObject({ prompt }) {
-  return postJSON('/api/generate', { prompt });
+export async function generateImage({ prompt }) {
+  return postJSON('/api/image', { prompt });
 }
 
 /**
- * ITERATE — stored source image + new instruction → Gemini edit → Hunyuan 3.1 GLB.
- * The prior image is passed back as context so the new model is a variation,
- * not a brand-new object.
+ * STEP 1b — ITERATE IMAGE: stored source image + instruction → Gemini edit (fast).
+ * The prior image is passed as context so the result is a variation.
  * @param {{ sourceImage: string, prompt: string, instruction: string }} args
+ * @returns {Promise<{ image: string, prompt: string }>}
+ */
+export async function iterateImage({ sourceImage, prompt, instruction }) {
+  return postJSON('/api/image', { sourceImage, prompt, instruction });
+}
+
+/**
+ * STEP 2 — IMAGE → MODEL: image → Hunyuan 3.1 GLB (slow; 100k faces, PBR).
+ * @param {{ image: string, prompt: string }} args
  * @returns {Promise<{ modelUrl: string, image: string, prompt: string }>}
  */
-export async function iterateObject({ sourceImage, prompt, instruction }) {
-  return postJSON('/api/iterate', { sourceImage, prompt, instruction });
+export async function imageToModel({ image, prompt }) {
+  return postJSON('/api/model', { image, prompt });
 }
 
 /**

@@ -181,6 +181,43 @@ app.post('/api/iterate', async (req, res) => {
   }
 });
 
+// ── Split pipeline (fast preview + slow mesh share one image) ──────────────
+// STEP 1: text prompt OR (sourceImage + instruction) -> Gemini image.
+app.post('/api/image', async (req, res) => {
+  const { prompt = '', sourceImage = null, instruction = '' } = req.body || {};
+  try {
+    if (sourceImage) {
+      if (!instruction.trim()) return res.status(400).json({ error: 'instruction required' });
+      console.log(`[image:edit] "${instruction}"`);
+      const image = await geminiImage({ prompt: instruction, sourceImage });
+      const effectivePrompt = prompt ? `${prompt}. ${instruction}` : instruction;
+      return res.json({ image, prompt: effectivePrompt });
+    }
+    if (!prompt.trim()) return res.status(400).json({ error: 'prompt required' });
+    console.log(`[image] "${prompt}"`);
+    const image = await geminiImage({ prompt });
+    res.json({ image, prompt });
+  } catch (e) {
+    console.error('[image] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// STEP 2: image (data-URI) -> Hunyuan 3.1 GLB.
+app.post('/api/model', async (req, res) => {
+  const { image, prompt = '' } = req.body || {};
+  if (!image) return res.status(400).json({ error: 'image required' });
+  try {
+    console.log('[model] building Hunyuan 3.1 mesh…');
+    const glbUrl = await hunyuanFromImage(image);
+    const modelUrl = await cacheGlb(glbUrl);
+    res.json({ modelUrl, image, prompt });
+  } catch (e) {
+    console.error('[model] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // LIGHTING: natural-language request + current rig state -> full target rig.
 // A thin interpretation layer — Gemini maps intent ("warm sunset", "dim and
 // moody") onto the Meshy lighting rig's concrete knobs. Returns the COMPLETE

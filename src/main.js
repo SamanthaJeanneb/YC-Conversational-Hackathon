@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { installMeshyLighting } from './lighting.js';
-import { generateObject, iterateObject, setLighting } from './pipeline.js';
+import { generateImage, iterateImage, imageToModel, setLighting } from './pipeline.js';
 import * as store from './store.js';
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -338,13 +338,19 @@ async function runGenerate() {
   const placement = pendingPlacement ? pendingPlacement.clone() : groundPointAhead();
   closePanels(true);
 
-  const placeholder = addPlaceholder(placement);
-  toast(`Generating “${prompt}”…`, true);
+  // Instant wireframe box, then swap to the image billboard once it arrives.
+  let ph = addBoxPlaceholder(placement);
+  toast(`Imagining “${prompt}”…`, true);
   try {
-    const result = await generateObject({ prompt });
-    scene.remove(placeholder);
+    const img = await generateImage({ prompt });
+    removePlaceholder(ph);
+    ph = addImageBillboard(placement, img.image); // fast shape preview
+
+    toast('Building 3D model…', true);
+    const result = await imageToModel({ image: img.image, prompt: img.prompt || prompt });
     const id = store.nextId();
     const root = await loadModelAt(result.modelUrl, placement);
+    removePlaceholder(ph); ph = null; // remove only after the mesh is in place
     root.userData.objectId = id;
     selectables.push(root);
     store.put(id, {
@@ -356,7 +362,7 @@ async function runGenerate() {
     });
     toast('Object created', false, 1800);
   } catch (err) {
-    scene.remove(placeholder);
+    removePlaceholder(ph);
     console.error(err);
     toast(`Generate failed: ${err.message}`, false, 4500);
   }
@@ -370,17 +376,23 @@ async function runIterate() {
   const id = selectedId;
   closePanels(true);
 
-  toast(`Iterating: “${instruction}”…`, true);
+  const placement = entry.placement.position.clone();
+  let ph = null;
+  toast(`Re-imagining: “${instruction}”…`, true);
   try {
-    const result = await iterateObject({
+    const img = await iterateImage({
       sourceImage: entry.sourceImage,
       prompt: entry.prompt,
       instruction,
     });
+    ph = addImageBillboard(placement, img.image); // fast shape preview of the change
+
+    toast('Building 3D model…', true);
+    const result = await imageToModel({ image: img.image, prompt: img.prompt || instruction });
     // Swap the model in place — keep the same world position.
-    const placement = entry.placement.position.clone();
     const newRoot = await loadModelAt(result.modelUrl, placement);
     newRoot.userData.objectId = id;
+    removePlaceholder(ph); ph = null;
 
     // Remove the old root from scene + selectables.
     scene.remove(entry.root);
@@ -398,6 +410,7 @@ async function runIterate() {
     if (selectedId === id) { selectedId = null; setSelected(id); } // re-apply highlight
     toast('Object updated', false, 1800);
   } catch (err) {
+    removePlaceholder(ph);
     console.error(err);
     toast(`Iterate failed: ${err.message}`, false, 4500);
   }
@@ -504,8 +517,12 @@ function loadModelAt(url, point) {
   });
 }
 
-// Loading placeholder: a soft wireframe cube where the object will appear.
-function addPlaceholder(point) {
+// Placeholders pulse while their object generates.
+const loadingPlaceholders = new Set();
+
+// Stage 1 (instant): a soft wireframe cube where the object will appear, shown
+// for the few seconds before the preview image arrives.
+function addBoxPlaceholder(point) {
   const g = new THREE.BoxGeometry(MODEL_TARGET_SIZE, MODEL_TARGET_SIZE, MODEL_TARGET_SIZE);
   const m = new THREE.MeshStandardMaterial({
     color: 0x6ea8ff, transparent: true, opacity: 0.18, roughness: 0.4,
@@ -516,6 +533,46 @@ function addPlaceholder(point) {
   mesh.userData._placeholder = true;
   scene.add(mesh);
   return mesh;
+}
+
+// Stage 2 (fast, ~seconds): the generated image as a camera-facing billboard —
+// the actual shape of what's coming, standing in until the GLB is ready.
+function addImageBillboard(point, dataURI) {
+  const tex = new THREE.TextureLoader().load(dataURI);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0.96, depthWrite: false });
+  const sprite = new THREE.Sprite(mat);
+  const base = MODEL_TARGET_SIZE * 1.25;
+  sprite.scale.set(base, base, 1);
+  sprite.position.set(point.x, point.y + base / 2, point.z);
+  sprite.userData._placeholder = true;
+
+  // Correct aspect + height once the image dimensions are known.
+  const img = new Image();
+  img.onload = () => {
+    const aspect = img.width / img.height || 1;
+    const h = base;
+    const w = base * aspect;
+    sprite.scale.set(w, h, 1);
+    sprite.position.y = point.y + h / 2;
+  };
+  img.src = dataURI;
+
+  scene.add(sprite);
+  loadingPlaceholders.add(sprite);
+  return sprite;
+}
+
+function removePlaceholder(obj) {
+  if (!obj) return;
+  scene.remove(obj);
+  loadingPlaceholders.delete(obj);
+  if (obj.isSprite) {
+    obj.material.map?.dispose?.();
+    obj.material.dispose();
+  } else {
+    disposeObject(obj);
+  }
 }
 
 function disposeObject(root) {
@@ -569,6 +626,12 @@ function animate() {
     clampToRoom(camera.position);
 
     updateCrosshair();
+  }
+
+  // Pulse loading billboards so they read as "generating," not placed.
+  if (loadingPlaceholders.size) {
+    const pulse = 0.78 + 0.18 * Math.sin(clock.elapsedTime * 4);
+    loadingPlaceholders.forEach((s) => { if (s.material) s.material.opacity = pulse; });
   }
 
   renderer.render(scene, camera);
