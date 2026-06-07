@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FPS 3D Builder</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --panel-bg: rgba(18, 18, 22, 0.92);
+        --panel-border: rgba(255, 255, 255, 0.12);
+        --accent: #6ea8ff;
+        --text: #f2f3f5;
+        --muted: #9aa0aa;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #1a1a1f; }
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: var(--text); }
+      #app { position: fixed; inset: 0; }
+      canvas { display: block; }
+
+      /* ── Crosshair ───────────────────────────────────────────── */
+      #crosshair {
+        position: fixed; left: 50%; top: 50%;
+        width: 18px; height: 18px; margin: -9px 0 0 -9px;
+        pointer-events: none; z-index: 20;
+        opacity: 0; transition: opacity 0.15s ease;
+      }
+      #crosshair.active { opacity: 1; }
+      #crosshair::before, #crosshair::after {
+        content: ""; position: absolute; background: rgba(255,255,255,0.85);
+        box-shadow: 0 0 2px rgba(0,0,0,0.8);
+      }
+      #crosshair::before { left: 50%; top: 0; width: 2px; height: 100%; margin-left: -1px; }
+      #crosshair::after  { top: 50%; left: 0; height: 2px; width: 100%; margin-top: -1px; }
+      #crosshair.on-object::before, #crosshair.on-object::after { background: var(--accent); }
+      #crosshair-dot {
+        position: absolute; left: 50%; top: 50%; width: 4px; height: 4px;
+        margin: -2px 0 0 -2px; border-radius: 50%; background: #fff;
+      }
+      #crosshair.on-object #crosshair-dot { background: var(--accent); transform: scale(1.4); }
+
+      /* ── Center prompt to lock pointer ───────────────────────── */
+      #lock-hint {
+        position: fixed; inset: 0; z-index: 30;
+        display: flex; align-items: center; justify-content: center;
+        flex-direction: column; gap: 10px; cursor: pointer;
+        background: radial-gradient(ellipse at center, rgba(0,0,0,0.25), rgba(0,0,0,0.55));
+      }
+      #lock-hint.hidden { display: none; }
+      #lock-hint .title { font-size: 22px; font-weight: 600; letter-spacing: 0.2px; }
+      #lock-hint .keys { font-size: 13px; color: var(--muted); max-width: 460px; text-align: center; line-height: 1.6; }
+      #lock-hint kbd {
+        background: rgba(255,255,255,0.1); border: 1px solid var(--panel-border);
+        border-radius: 4px; padding: 1px 6px; font-family: inherit; font-size: 12px;
+      }
+
+      /* ── Floating panels (generate / iterate) ────────────────── */
+      .panel {
+        position: fixed; z-index: 40; min-width: 320px; max-width: 380px;
+        background: var(--panel-bg); border: 1px solid var(--panel-border);
+        border-radius: 12px; padding: 16px; backdrop-filter: blur(12px);
+        box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+      }
+      .panel.hidden { display: none; }
+      .panel .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 8px; }
+      .panel .ctx { font-size: 12px; color: var(--muted); margin-bottom: 10px; line-height: 1.4; }
+      .panel textarea {
+        width: 100%; resize: none; min-height: 64px; padding: 10px 12px;
+        background: rgba(0,0,0,0.35); color: var(--text);
+        border: 1px solid var(--panel-border); border-radius: 8px;
+        font: inherit; font-size: 14px; outline: none;
+      }
+      .panel textarea:focus { border-color: var(--accent); }
+      .panel .row { display: flex; gap: 8px; margin-top: 12px; }
+      .panel button {
+        flex: 1; padding: 9px 12px; border-radius: 8px; border: 1px solid transparent;
+        font: inherit; font-weight: 600; font-size: 13px; cursor: pointer;
+      }
+      .panel button.primary { background: var(--accent); color: #06122a; }
+      .panel button.primary:hover { background: #87b8ff; }
+      .panel button.ghost { background: transparent; border-color: var(--panel-border); color: var(--muted); }
+      .panel button.ghost:hover { color: var(--text); }
+      .panel .preview { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+      .panel .preview img { width: 48px; height: 48px; border-radius: 6px; object-fit: cover; border: 1px solid var(--panel-border); }
+
+      /* ── Toast / status ──────────────────────────────────────── */
+      #toast {
+        position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+        z-index: 50; background: var(--panel-bg); border: 1px solid var(--panel-border);
+        border-radius: 10px; padding: 10px 16px; font-size: 13px; display: flex;
+        align-items: center; gap: 10px; opacity: 0; transition: opacity 0.2s ease;
+        pointer-events: none; max-width: 80vw;
+      }
+      #toast.show { opacity: 1; }
+      #toast .spinner {
+        width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.25);
+        border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .hidden { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+
+    <div id="crosshair">
+      <div id="crosshair-dot"></div>
+    </div>
+
+    <div id="lock-hint">
+      <div class="title">Click to enter</div>
+      <div class="keys">
+        <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / arrows to walk &nbsp;·&nbsp; mouse to look<br />
+        <kbd>Left-click</kbd> an object to iterate &nbsp;·&nbsp; <kbd>Right-click</kbd> the ground to generate &nbsp;·&nbsp; <kbd>Esc</kbd> to release
+      </div>
+    </div>
+
+    <!-- Generate menu -->
+    <div id="generate-panel" class="panel hidden">
+      <div class="label">Generate object</div>
+      <textarea id="generate-input" placeholder="Describe the object to create…" rows="3"></textarea>
+      <div class="row">
+        <button id="generate-cancel" class="ghost">Cancel</button>
+        <button id="generate-go" class="primary">Generate</button>
+      </div>
+    </div>
+
+    <!-- Inline iterate control -->
+    <div id="iterate-panel" class="panel hidden">
+      <div class="label">Iterate on object</div>
+      <div class="preview">
+        <img id="iterate-thumb" alt="" />
+        <div class="ctx" id="iterate-ctx"></div>
+      </div>
+      <textarea id="iterate-input" placeholder="Describe the change…" rows="2"></textarea>
+      <div class="row">
+        <button id="iterate-cancel" class="ghost">Close</button>
+        <button id="iterate-go" class="primary">Iterate</button>
+      </div>
+    </div>
+
+    <div id="toast"></div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
