@@ -64,11 +64,13 @@ While a menu is open the pointer unlocks so you can type; it re-locks on close.
 
 ## Voice control (optional)
 
-A LiveKit Agents worker (Deepgram STT → Claude Haiku 4.5 router → Minimax TTS)
-turns speech into calls on the generate / iterate / lighting functions. Quick start:
+A LiveKit Agents worker turns speech into calls on the generate / iterate /
+lighting functions. STT (Deepgram Nova-3), LLM (gpt-4.1-mini router) and TTS
+(Cartesia Sonic-2) **all run through LiveKit Inference** — one bill, the only
+creds needed are `LIVEKIT_*`. Quick start:
 
 ```bash
-# add ANTHROPIC_API_KEY, DEEPGRAM_API_KEY, MINIMAX_API_KEY and LIVEKIT_* to .env
+# add LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET to .env
 cd voice && python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt && python agent.py download-files
 python agent.py dev          # worker auto-joins the room the browser opens

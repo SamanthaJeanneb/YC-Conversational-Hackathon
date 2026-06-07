@@ -1,5 +1,5 @@
-# Voice worker dependencies.
+# Voice worker dependencies — STT/LLM/TTS all run through LiveKit Inference,
+# so NO provider plugins/extras are needed. Only local VAD + turn detector.
 # Install with:  pip install -r requirements.txt
-# (equivalently: pip install "livekit-agents[deepgram,anthropic,minimax,silero,turn-detector]~=1.5" python-dotenv)
-livekit-agents[deepgram,anthropic,minimax,silero,turn-detector]~=1.5
+livekit-agents[silero,turn-detector]~=1.5
 python-dotenv

@@ -17,9 +17,14 @@ Latency design (see LATENCY REQUIREMENTS):
   - Semantic multilingual turn detector → responds the moment you stop talking.
   - Barge-in / interruptions are on by default.
 
+STT, LLM, and TTS all route through LiveKit Inference (no provider keys/plugins
+— a single bill on your LiveKit credit). The only credentials needed are
+LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET. VAD (Silero) and the turn
+detector are local plugins that need no keys.
+
 Run:
-  pip install "livekit-agents[deepgram,anthropic,minimax,silero,turn-detector]~=1.5" python-dotenv
-  python agent.py download-files     # one-time: fetch turn-detector model
+  pip install "livekit-agents[silero,turn-detector]~=1.5" python-dotenv
+  python agent.py download-files     # one-time: fetch VAD + turn-detector models
   python agent.py dev                # start the worker (auto-joins new rooms)
 """
 
@@ -43,9 +48,10 @@ from livekit.agents import (
     WorkerOptions,
     cli,
     function_tool,
+    inference,  # LiveKit Inference gateway — STT/LLM/TTS on LiveKit creds only
 )
-from livekit.plugins import anthropic, deepgram, minimax, silero
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from livekit.plugins import silero  # local VAD (no API key)
+from livekit.plugins.turn_detector.multilingual import MultilingualModel  # local turn detector
 
 logger = logging.getLogger("voice-router")
 
@@ -153,13 +159,16 @@ def prewarm(proc):
 async def entrypoint(ctx: JobContext):
     await ctx.connect()
 
+    # Everything routes through LiveKit Inference — one bill on your LiveKit
+    # credit, no provider keys/plugins. (Claude isn't in the Inference catalog,
+    # so the router LLM is gpt-4.1-mini: fast and strong at tool calling.)
     session = AgentSession(
         # Streaming STT, multilingual so the semantic turn detector can work.
-        stt=deepgram.STT(model="nova-3", language="multi"),
-        # Fast routing LLM. Low temp + few tokens — it only emits tool calls.
-        llm=anthropic.LLM(model="claude-haiku-4-5", temperature=0.2, max_tokens=128),
-        # Streaming TTS for the fixed confirmations.
-        tts=minimax.TTS(model="speech-2.6-turbo"),
+        stt=inference.STT(model="deepgram/nova-3", language="multi"),
+        # Fastest capable catalog model for intent parsing / tool routing.
+        llm=inference.LLM(model="openai/gpt-4.1-mini"),
+        # Lowest-latency streaming TTS, natural English voice (Cartesia "Jacqueline").
+        tts=inference.TTS(model="cartesia/sonic-2", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"),
         vad=ctx.proc.userdata["vad"],
         # Semantic, multilingual end-of-turn detection (responds when you stop,
         # not on a fixed silence timeout). Barge-in is on by default.
