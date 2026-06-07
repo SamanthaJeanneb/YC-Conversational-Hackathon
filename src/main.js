@@ -121,6 +121,10 @@ controls.addEventListener('unlock', () => {
 lockHint.addEventListener('click', () => controls.lock());
 
 window.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.code === 'KeyC') { e.preventDefault(); copySelected(); return; }
+  if ((e.metaKey || e.ctrlKey) && e.code === 'KeyV') { e.preventDefault(); pasteClipboard(); return; }
+  if (e.code === 'BracketRight') { resizeSelected(1.1); return; }      // ] bigger
+  if (e.code === 'BracketLeft') { resizeSelected(1 / 1.1); return; }   // [ smaller
   if (e.code === 'KeyG') { toggleGrab(); return; }
   if (e.code === 'KeyV') { voiceEl.click(); return; }
   switch (e.code) {
@@ -138,6 +142,15 @@ window.addEventListener('keyup', (e) => {
     case 'KeyD': case 'ArrowRight': keys.right = false; break;
   }
 });
+
+// Scroll wheel resizes the object you're aiming at / carrying (up = bigger).
+// Only hijacks the wheel when an object is targeted, so normal scroll is intact.
+window.addEventListener('wheel', (e) => {
+  const id = grabbedId || selectedId || hoverObjectId;
+  if (!id || !store.get(id)) return;
+  e.preventDefault();
+  resizeSelected(e.deltaY < 0 ? 1.1 : 1 / 1.1);
+}, { passive: false });
 
 // ─────────────────────────────────────────────────────────────────────────
 //  Crosshair raycasting (forward from screen center each frame)
@@ -267,6 +280,89 @@ function dropGrab(commit) {
 function cancelGrab() { if (grabbedId) dropGrab(false); }
 
 // ─────────────────────────────────────────────────────────────────────────
+//  Copy / paste — duplicate an object locally (no regeneration round-trip)
+// ─────────────────────────────────────────────────────────────────────────
+let clipboardId = null; // id of the object to duplicate on the next paste
+
+function copySelected() {
+  const id = selectedId || hoverObjectId;
+  if (!id || !store.get(id)) { toast('Aim at or select an object to copy', false, 2200); return; }
+  clipboardId = id;
+  toast('Copied — Cmd/Ctrl+V to paste', false, 1800);
+}
+
+function pasteClipboard() {
+  const src = clipboardId && store.get(clipboardId);
+  if (!src) { toast('Nothing copied yet — aim at an object and press Cmd/Ctrl+C', false, 2600); return; }
+
+  // Drop the copy at the placement marker if one is set, else on the surface
+  // under the crosshair, else just ahead of the player.
+  const at = pendingPlacement ? pendingPlacement.clone()
+           : (groundHoverPoint ? groundHoverPoint.clone() : groundPointAhead());
+  clampToRoom(at);
+  clearPlacementMarker();
+
+  // Deep-clone the in-scene mesh, then clone geometry + materials per mesh so the
+  // copy is fully independent: highlighting, iterating, or disposing it never
+  // touches the original (clone() shares geometry/materials by reference otherwise).
+  const newRoot = src.root.clone(true);
+  const id = store.nextId();
+  newRoot.userData = { ...newRoot.userData, objectId: id };
+  newRoot.traverse((o) => {
+    if (!o.isMesh) return;
+    o.castShadow = true; o.receiveShadow = true;
+    if (o.geometry) o.geometry = o.geometry.clone();
+    if (Array.isArray(o.material)) o.material = o.material.map((m) => m.clone());
+    else if (o.material) o.material = o.material.clone();
+  });
+
+  // Seat the copy's base on the paste point (same box-seating the loader uses).
+  newRoot.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(newRoot);
+  const c = new THREE.Vector3(); box.getCenter(c);
+  newRoot.position.x += at.x - c.x;
+  newRoot.position.z += at.z - c.z;
+  newRoot.position.y += at.y - box.min.y;
+
+  scene.add(newRoot);
+  selectables.push(newRoot);
+  store.put(id, {
+    root: newRoot,
+    sourceImage: src.sourceImage, // carry context so the copy can be iterated on its own
+    prompt: src.prompt,
+    sizeMeters: src.sizeMeters,   // inherit the original's real-world size
+    placement: { position: at.clone(), scale: newRoot.userData._fitScale || 1 },
+    history: [...(src.history || [])],
+  });
+  setSelected(id);
+  toast('Pasted', false, 1500);
+}
+
+// Resize the targeted object about its base footprint. Updates the stored
+// real-world size so a later iterate keeps the new scale instead of resetting.
+function resizeSelected(factor) {
+  const id = grabbedId || selectedId || hoverObjectId;
+  const entry = id && store.get(id);
+  if (!entry) { toast('Aim at or select an object to resize', false, 1600); return; }
+  const root = entry.root;
+  root.updateMatrixWorld(true);
+  let box = new THREE.Box3().setFromObject(root);
+  const baseY = box.min.y;
+  const cBefore = new THREE.Vector3(); box.getCenter(cBefore);
+  root.scale.multiplyScalar(factor);
+  root.userData._fitScale = (root.userData._fitScale || 1) * factor;
+  // Reseat so it scales about its base/footprint, not the raw model origin.
+  root.updateMatrixWorld(true);
+  box = new THREE.Box3().setFromObject(root);
+  const cAfter = new THREE.Vector3(); box.getCenter(cAfter);
+  root.position.x += cBefore.x - cAfter.x;
+  root.position.z += cBefore.z - cAfter.z;
+  root.position.y += baseY - box.min.y;
+  entry.sizeMeters = (entry.sizeMeters || MODEL_TARGET_SIZE) * factor;
+  entry.placement.scale = root.userData._fitScale;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 //  Mouse: clicks only TARGET — generation/iteration happen by voice (LiveKit).
 //    left-click  = select the object under the crosshair (iterate target)
 //    right-click = drop a placement marker (where the next spoken object spawns)
@@ -352,7 +448,8 @@ async function generateAt(prompt, placement) {
     toast('Building 3D model…', true);
     const result = await imageToModel({ image: img.image, prompt: img.prompt || prompt });
     const id = store.nextId();
-    const root = await loadModelAt(result.modelUrl, placement);
+    const sizeMeters = Number.isFinite(img.sizeMeters) ? img.sizeMeters : MODEL_TARGET_SIZE;
+    const root = await loadModelAt(result.modelUrl, placement, sizeMeters);
     removePlaceholder(ph); ph = null; // remove only after the mesh is in place
     root.userData.objectId = id;
     selectables.push(root);
@@ -360,6 +457,7 @@ async function generateAt(prompt, placement) {
       root,
       sourceImage: result.image,
       prompt: result.prompt || prompt,
+      sizeMeters, // real-world longest-axis target; preserved on iterate, changed on resize
       placement: { position: placement.clone(), scale: root.userData._fitScale || 1 },
       history: [{ instruction: '(generate)', prompt: result.prompt || prompt, image: result.image }],
     });
@@ -389,8 +487,9 @@ async function iterateOn(id, instruction) {
     });
     toast('Building 3D model…', true);
     const result = await imageToModel({ image: img.image, prompt: img.prompt || instruction });
-    // Swap the model in place — keep the same world position.
-    const newRoot = await loadModelAt(result.modelUrl, placement);
+    // Swap the model in place — keep the same world position AND the same
+    // real-world size (don't snap back to the default target on every iterate).
+    const newRoot = await loadModelAt(result.modelUrl, placement, entry.sizeMeters);
     newRoot.userData.objectId = id;
 
     // Remove the old (ghosted) root from scene + selectables.
@@ -459,8 +558,27 @@ function applyLighting(cfg) {
   if (Number.isFinite(cfg.exposure)) renderer.toneMappingExposure = clamp(cfg.exposure, 0.1, 3);
 }
 
-// Core lighting flow, callable from the voice layer.
+// The default rig, snapshotted once at startup so "reset the lighting" can
+// restore it instantly (lights + scene.background are already set above).
+const DEFAULT_LIGHTING = currentLighting();
+
+// "reset / default / normal / back to how it was" → restore the startup rig.
+function isResetRequest(p) {
+  return /\b(reset|default|original|restore)\b/i.test(p)
+    || /back to (normal|default|original)/i.test(p)
+    || /\bnormal lighting\b/i.test(p);
+}
+
+function resetLighting() {
+  applyLighting(DEFAULT_LIGHTING);
+  toast('Lighting reset to default', false, 1800);
+}
+
+// Core lighting flow, callable from the voice layer. Handles ANY free-form
+// description (colors, named scenes, moods, time of day) via the LLM, and
+// short-circuits reset requests to the snapshotted default with no round-trip.
 async function applyLightingPrompt(prompt) {
+  if (isResetRequest(prompt)) { resetLighting(); return; }
   toast(`Lighting: “${prompt}”…`, true);
   try {
     const cfg = await setLighting({ prompt, current: currentLighting() });
@@ -477,7 +595,7 @@ async function applyLightingPrompt(prompt) {
 // ─────────────────────────────────────────────────────────────────────────
 const gltfLoader = new GLTFLoader();
 
-function loadModelAt(url, point) {
+function loadModelAt(url, point, targetSize = MODEL_TARGET_SIZE) {
   return new Promise((resolve, reject) => {
     gltfLoader.load(
       url,
@@ -485,12 +603,13 @@ function loadModelAt(url, point) {
         const root = gltf.scene || (gltf.scenes && gltf.scenes[0]);
         if (!root) return reject(new Error('GLB had no scene'));
 
-        // Normalize to a sensible size and seat the base on the surface.
+        // Scale to the object's real-world longest-axis size (meters) so a mug
+        // ends up small and a table normal — falling back to the default target.
         const box = new THREE.Box3().setFromObject(root);
         const size = new THREE.Vector3(); box.getSize(size);
         const center = new THREE.Vector3(); box.getCenter(center);
         const maxAxis = Math.max(size.x, size.y, size.z) || 1;
-        const fit = MODEL_TARGET_SIZE / maxAxis;
+        const fit = (Number.isFinite(targetSize) && targetSize > 0 ? targetSize : MODEL_TARGET_SIZE) / maxAxis;
         root.scale.setScalar(fit);
         root.userData._fitScale = fit;
 
