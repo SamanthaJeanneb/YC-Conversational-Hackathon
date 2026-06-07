@@ -30,6 +30,7 @@ Run:
 
 import json
 import logging
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -111,10 +112,26 @@ class SceneRouter(Agent):
                 "Pick the single best tool and fill its arguments from what the user "
                 "said. Do NOT free-narrate — the action tools speak their own short "
                 "confirmation, and the one time you choose your own words is ask_clarify.\n"
-                "- 'make / create / add / spawn / generate X' -> generate_object with "
-                "a concise visual prompt (just the subject, e.g. 'a red ceramic mug').\n"
+                "- A request for a WHOLE WORLD / environment / level / scene / place / "
+                "landscape you walk around inside ('build a dungeon crossroads with a "
+                "stream', 'a forest clearing', 'a sci-fi hangar', 'make me a desert') -> "
+                "queue_world with the FULL description in the user's words. A world is the "
+                "surroundings, NOT a single prop. At the start of the session the user is "
+                "in an empty flat room and you've asked what world to build, so their first "
+                "answer is almost always a world -> queue_world. When torn between a world "
+                "and an object, ask: would you walk around inside it? If yes -> queue_world.\n"
+                "- 'make / create / add / spawn / generate X' (a single object/prop) -> "
+                "generate_object with a concise visual prompt (just the subject, e.g. 'a "
+                "red ceramic mug').\n"
                 "- A change to the object already in focus ('make it bigger', 'add "
                 "wings', 'turn it metallic') -> iterate_object with only the change.\n"
+                "APPROVAL GATE (iterate only): after an iterate_object call the app "
+                "shows a PREVIEW image and you ask the user 'want me to build it?'. On "
+                "that follow-up turn ONLY: 'yes / build it / go ahead / do it / looks "
+                "good / perfect / yeah' -> approve_build; 'no / cancel / scrap it / "
+                "never mind' -> cancel_build; but if they ask for a FURTHER change "
+                "('make it bluer', 'bigger') -> iterate_object again (it refines the "
+                "same preview). Never call approve_build / cancel_build at any other time.\n"
                 "- Mood / ambiance / light requests -> set_lighting with the description. "
                 "ANY request about the scene's light, brightness, color, atmosphere, "
                 "time of day, or mood goes here — pass the user's own words as the "
@@ -144,6 +161,22 @@ class SceneRouter(Agent):
             ),
         )
         self.room = None  # set in entrypoint once we have the JobContext
+        # Guard against speaking the same line twice in quick succession (mic
+        # echo of our own TTS, turn splitting, or overlapping triggers can fire
+        # the same say twice). Every spoken line goes through _say().
+        self._last_say_text = ""
+        self._last_say_t = 0.0
+
+    # ── speak once (dedupe identical back-to-back lines) ─────────────────────
+    def _say(self, session, text: str, *, add_to_chat_ctx: bool = False, limit: int = 60) -> None:
+        text = _trim(text, limit)
+        now = time.monotonic()
+        if text == self._last_say_text and now - self._last_say_t < 8.0:
+            logger.info("suppressed duplicate say: %s", text)
+            return
+        self._last_say_text = text
+        self._last_say_t = now
+        session.say(text, allow_interruptions=True, add_to_chat_ctx=add_to_chat_ctx)
 
     # ── data-channel helper ────────────────────────────────────────────────
     async def _publish(self, payload: dict) -> None:
@@ -160,7 +193,7 @@ class SceneRouter(Agent):
     # so the LLM doesn't add its own reply. `confirm` already echoes the request.
     async def _route(self, context: RunContext, payload: dict, confirm: str) -> None:
         await self._publish(payload)  # visual change starts immediately
-        context.session.say(_trim(confirm), allow_interruptions=True, add_to_chat_ctx=False)
+        self._say(context.session, confirm)  # spoken once (dedupes echo repeats)
         raise StopResponse()
 
     # ── tools (the router) ─────────────────────────────────────────────────
@@ -175,8 +208,25 @@ class SceneRouter(Agent):
     async def iterate_object(self, context: RunContext, instruction: str) -> None:
         """Modify the object currently selected / looked at. Use for changes to an
         existing object ('make it bigger', 'add a handle', 'turn it red'). `instruction`
-        is only the change, not the original description."""
-        await self._route(context, {"type": "iterate", "instruction": instruction}, f"Got it — {instruction}.")
+        is only the change, not the original description. The browser generates a
+        PREVIEW image first; once it's on screen you'll ask the user to approve before
+        the model is rebuilt (see approve_build / cancel_build)."""
+        await self._route(context, {"type": "iterate", "instruction": instruction}, "One moment — previewing that.")
+
+    @function_tool()
+    async def approve_build(self, context: RunContext) -> None:
+        """Approve the previewed change and build the 3D model. Use ONLY right after you
+        asked 'want me to build it?' and the user agrees ('yes', 'build it', 'go ahead',
+        'do it', 'looks good', 'perfect', 'yeah'). If they instead ask for another change,
+        call iterate_object; if they decline, call cancel_build."""
+        await self._route(context, {"type": "approve_build"}, "Building it now.")
+
+    @function_tool()
+    async def cancel_build(self, context: RunContext) -> None:
+        """Discard the previewed change without building. Use ONLY right after you asked
+        'want me to build it?' and the user declines ('no', 'cancel', 'scrap it', 'never
+        mind', 'start over')."""
+        await self._route(context, {"type": "cancel_build"}, "Okay, scrapped that.")
 
     @function_tool()
     async def set_lighting(self, context: RunContext, description: str) -> None:
@@ -196,15 +246,24 @@ class SceneRouter(Agent):
         per object. `question` must be a single concise spoken question."""
         # Spoken in the model's own words; kept in context so it knows it already
         # asked and can merge the user's answer with the original request.
-        context.session.say(_trim(question, 100), allow_interruptions=True, add_to_chat_ctx=True)
+        self._say(context.session, question, add_to_chat_ctx=True, limit=100)
         raise StopResponse()
 
-    # ── stubs for later wiring (worldgen + Moss retrieval) ──────────────────
+    # ── worldgen: build a whole environment from a spoken description ────────
     @function_tool()
     async def queue_world(self, context: RunContext, prompt: str) -> None:
-        """STUB (worldgen, to be wired later): queue generation of a whole environment
-        / world from a description. Publishes the command; browser handling is TODO."""
-        await self._route(context, {"type": "queue_world", "prompt": prompt}, f"Queuing a {prompt} world.")
+        """Build a whole WORLD / environment / level the user walks around inside, from a
+        spoken description ('a dungeon crossroads with a stream', 'a forest clearing').
+        The browser generates a preview image, shows it for approval, and on approval
+        loads the environment and drops the player inside. `prompt` is the user's full
+        world description in their own words."""
+        await self._route(
+            context,
+            {"type": "queue_world", "prompt": prompt},
+            "Here's a preview — approve it to build your world.",
+        )
+
+    # ── stub for later wiring (Moss retrieval) ──────────────────────────────
 
     @function_tool()
     async def retrieve_object(self, context: RunContext, query: str) -> None:
@@ -254,12 +313,36 @@ async def entrypoint(ctx: JobContext):
     agent = SceneRouter()
     agent.room = ctx.room  # tools publish via this
 
+    # When the browser finishes an iterate PREVIEW image and shows it, it sends us
+    # a `preview_ready` over the same data topic. We ask for approval ONLY now —
+    # so the spoken "want me to build it?" lands after the image is on screen, not
+    # before. Kept in chat ctx so the model knows it asked and can route the user's
+    # yes/no to approve_build / cancel_build.
+    @ctx.room.on("data_received")
+    def _on_browser_data(packet) -> None:  # noqa: ANN001
+        if getattr(packet, "topic", None) != DATA_TOPIC:
+            return
+        try:
+            msg = json.loads(bytes(packet.data).decode("utf-8"))
+        except Exception:
+            return
+        if msg.get("type") == "preview_ready":
+            subject = msg.get("subject") or "the change"
+            agent._say(session, f"Here's {subject}. Want me to build it?", add_to_chat_ctx=True, limit=100)
+
     # Default close_on_disconnect=True: when the participant leaves (toggle off /
     # reload), close the session so this job ends and the room is recycled. The
     # browser opens a FRESH room on every connect, so each toggle-on gets a new
     # job bound to the current participant — no stale, deaf sessions. (Brief
     # network blips don't drop the participant; LiveKit resumes them transparently.)
     await session.start(agent=agent, room=ctx.room)
+
+    # Greet ONLY when the player is still in the empty flat world. The browser
+    # tags the room name "built" once a world exists, so re-toggling voice after
+    # a world is loaded never re-asks "what world would you like to build?".
+    # On a fresh page (flat world again) the tag is absent and we greet normally.
+    if "built" not in ctx.room.name:
+        agent._say(session, "Hi! What kind of world would you like to build?")
 
 
 if __name__ == "__main__":

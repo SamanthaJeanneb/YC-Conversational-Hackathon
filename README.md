@@ -1,81 +1,102 @@
-# FPS 3D Builder
+# WorldVoice
 
-A browser-based, first-person 3D scene (plain three.js) where you walk around a
-room and **generate / iterate 3D objects with the crosshair** — no chat interface.
+> Speak a world into existence, then redesign it with your voice.
 
-It reuses the Suzanne3d pipeline:
+## What It Does
 
-- **Lighting:** `src/lighting.js` is the `installMeshyLighting` recipe ported
-  from `suzanne3d-main/.../sharedLighting.ts` (HDR studio IBL + warm key + hot
-  rim), with the same renderer setup (ACES filmic, exposure 0.9). The HDR
-  (`public/studio_small_03_1k.hdr`) is copied from Suzanne.
-- **Generation:** Gemini `gemini-2.5-flash-image` → Replicate
-  **`tencent/hunyuan-3d-3.1`** with `face_count: 100000`, `enable_pbr: true`
-  — the same `hunyuan31` workflow used in `suzanne3d-main/backend/app.py`.
-- **Secrets:** read from `~/Desktop/suzanne3d-main/.env`
-  (`GEMINI_API_KEY`, `REPLICATE_API_TOKEN` / `REPLICATE_API_KEY`). Nothing is
-  hardcoded. A local `./.env` overrides if present.
+WorldVoice generates full 3D environments from a spoken description and lets you
+iterate on them in real time through conversation. Describe a scene, walk through
+it in your browser, then keep talking to reshape it: add objects, change the
+lighting, restyle surfaces, swap materials. No 3D software, no modeling skills.
+Just your voice and a world that listens.
 
-## Run
+## How It Works
 
-```bash
-npm install
-npm run dev:all      # vite (5173) + proxy (8787) together
-# or, in two terminals:  npm run server   and   npm run dev
-```
+### World Generation — generative world models + Gaussian splatting
 
-Open http://localhost:5173.
+A natural-language or image prompt is lifted into a fully navigable 3D world by
+**Tencent HY-World 2.0**, a generative *world model* rather than a single-image
+generator. The pipeline is a cascade of diffusion and neural-reconstruction
+stages:
 
-Check the backend is wired up: http://localhost:8787/api/health
+- **HY-Pano 2.0** — a panoramic latent-diffusion model synthesizes a seamless
+  360° equirectangular environment from the prompt, fixing global scene
+  structure, illumination, and style in one coherent shot.
+- **WorldNav** — plans a camera trajectory through the panorama, sampling the
+  viewpoints needed to recover parallax and occlusion cues.
+- **WorldStereo 2.0** — multi-view stereo with monocular depth priors lifts the
+  posed 2D views into metric 3D geometry.
+- **WorldMirror 2.0** — a feed-forward neural reconstruction model fuses the
+  posed views into a dense, geometrically consistent scene.
+- **3DGS** — the scene is exported as a **3D Gaussian Splatting** radiance field
+  for photoreal, real-time rendering, alongside a watertight **GLB** mesh for
+  collision, physics, and AR.
 
-## Controls
+Unlike video-diffusion "world simulators" that hallucinate frames, this produces
+*persistent, explorable geometry* — real 3D assets you can walk through, not a
+rendered fly-through. The pipeline runs on cloud **A100** GPUs.
 
-Generation, iteration, and lighting are **voice-controlled** (LiveKit) — there
-is no text/chat interface. Clicks only *target*; you speak the rest.
+### Voice Interaction — streaming STT → LLM intent parsing
 
-| Action | |
-|---|---|
-| Enter | Click the scene to lock the pointer |
-| Move | `W A S D` / arrow keys (grounded, eye height 1.6) |
-| Look | Mouse |
-| **Voice** | `V` or the **Voice** button → always-listening control (see `voice/`) |
-| **Generate** | **Right-click** the ground to set a spawn marker, then say *"a red mug"* (no marker → spawns in front of you) |
-| **Iterate** | **Left-click** an object to select it, then say *"make it bigger"* / *"add a handle"* |
-| **Lighting** | say *"warm sunset"* / *"dim and moody"* |
-| **Move** | `G` to grab the object under the crosshair; it follows you — **left-click** to place, **right-click**/`Esc` to cancel |
-| Release | `Esc` |
+**LiveKit** provides low-latency WebRTC audio transport. Streaming speech-to-text
+feeds a **Claude** intent parser that maps free-form utterances onto a typed
+command schema via structured tool-calling: generate a new world, drop an
+object, change the lighting, restyle a surface, or teleport to a location. Each
+command routes to either an asynchronous generation job or an instant
+client-side scene operation, so conversational latency stays decoupled from heavy
+GPU work.
 
-While an object generates, a fast **outline placeholder** (silhouette + edges traced
-from the Gemini preview image) appears at the spot, then is replaced by the GLB.
+### 3D Iteration — diffusion image editing + neural re-reconstruction
 
-While a menu is open the pointer unlocks so you can type; it re-locks on close.
+To iterate on a generated world we close a *perception → edit → reconstruction*
+loop. The current viewport is captured; **Qwen-Image**, an instruction-guided
+diffusion editor, applies the requested change (restyle, recolor, add detail,
+shift atmosphere); and the edited view is re-projected through **WorldMirror
+2.0** to reconstruct updated 3D geometry in place. This updates the scene from a
+single voice command without regenerating the entire world.
+
+### Rendering and AR — three.js + WebXR
+
+The world loads in the browser via **three.js** (WebGL2). First-person
+navigation lets you walk the environment on desktop; on WebXR-capable mobile, the
+generated world is anchored into your physical space as **AR**. Objects generated
+mid-session drop into the live scene as GLB meshes.
 
 ## Architecture
 
-- `src/main.js` — the whole three.js app (room, first-person controls, crosshair
-  raycast, click-targeting, generate/iterate/lighting flows, model loading).
-- `src/pipeline.js` — the two clearly-marked async calls into the backend
-  (`generateObject`, `iterateObject`). **Swap the endpoints here** if you want to
-  point at the full Flask backend (`/api/generate-glb` + job polling) instead.
-- `src/store.js` — in-memory object store keyed by id; holds mesh + the hidden
-  source image / prompt history used for iteration.
-- `server/index.js` — lean proxy: Gemini → Hunyuan 3.1, serves GLBs same-origin,
-  and mints LiveKit voice tokens (`/api/voice-token`).
-- `src/voice.js` + `voice/agent.py` — the optional real-time **voice layer**
-  (LiveKit Agents). The Python worker routes speech to the scene functions over
-  a data channel; it never touches three.js. See [`voice/README.md`](voice/README.md).
-
-## Voice control (optional)
-
-A LiveKit Agents worker turns speech into calls on the generate / iterate /
-lighting functions. STT (Deepgram Nova-3), LLM (gpt-4.1-mini router) and TTS
-(Cartesia Sonic-2) **all run through LiveKit Inference** — one bill, the only
-creds needed are `LIVEKIT_*`. Quick start:
-
-```bash
-# add LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET to .env
-cd voice && python3.11 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt && python agent.py download-files
-python agent.py dev          # worker auto-joins the room the browser opens
 ```
-Then click **Voice** in the app. Full details in [`voice/README.md`](voice/README.md).
+Voice Input → LiveKit (audio transport)
+    → STT → Claude (intent parsing)
+        → "rooftop garden"        → HY-World 2.0 (async, full worldgen → 3DGS + GLB)
+        → "make the walls brick"  → Qwen (image edit) → WorldMirror 2.0 (reconstruct) → scene update
+        → "add a bench here"      → image-to-3D diffusion (Hunyuan3D / Tripo3D) → drop GLB into scene
+        → "make it sunset"        → client-side lighting change (instant)
+    → three.js / WebXR (rendering)
+    → Minimax TTS (spoken response)
+```
+
+## Tech Stack
+
+- **World Generation:** HY-World 2.0 (HY-Pano 2.0, WorldNav, WorldStereo 2.0, WorldMirror 2.0) → 3D Gaussian Splatting + GLB
+- **3D Iteration:** Qwen-Image (diffusion image editing) + WorldMirror 2.0 (neural 3D reconstruction from edited views)
+- **Image Generation:** Minimax image-01
+- **Object Generation:** image-to-3D diffusion (Hunyuan3D / Tripo3D)
+- **Voice Transport:** LiveKit
+- **Intent Parsing:** Claude (Anthropic)
+- **Speech:** streaming STT + Minimax TTS
+- **Rendering:** three.js, WebXR
+- **Infrastructure:** RunPod (A100 GPUs), AWS
+
+## Hackathon Tracks
+
+- **Co-Pilot** — an ambient agent that takes voice input and displays live 3D context
+- **Support** — voice-guided world building with real-time visual feedback
+
+## Team
+
+- Samantha Jeanneb
+- Yehor Ivanenko
+
+## Built At
+
+Conversational AI Hackathon, hosted by Moss (F25) at Y Combinator — June 6–7, 2026

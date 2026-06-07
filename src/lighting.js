@@ -1,8 +1,6 @@
-// Ported verbatim from suzanne3d-main/styled-pages/src/three/sharedLighting.ts
-// (TS types stripped). Same "Meshy-style" recipe so this scene reads exactly
-// like Suzanne's previews: HDR studio IBL with a RoomEnvironment fallback,
-// restrained ambient/hemi fill, soft warm key, cool low fill, and a hot white
-// rim — the signature silhouette "shine."
+// "Meshy-style" studio lighting recipe: HDR studio IBL with a RoomEnvironment
+// fallback, restrained ambient/hemi fill, soft warm key, cool low fill, and a
+// hot white rim — the signature silhouette "shine."
 //
 // Renderer setup the caller must still do (renderer-global, not scene-attached):
 //   renderer.outputColorSpace   = THREE.SRGBColorSpace;

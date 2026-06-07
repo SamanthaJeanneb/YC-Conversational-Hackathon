@@ -2,16 +2,10 @@
 //  PIPELINE WIRING  —  confirm these endpoints
 // ─────────────────────────────────────────────────────────────────────────
 //
-// These are the ONLY two calls into the generation backend. They map onto the
-// Suzanne3d pipeline (Gemini image generation → Replicate Hunyuan 3.1).
-// The backend (server/index.js) reuses the exact model + params from
-// suzanne3d-main: gemini-2.5-flash-image and tencent/hunyuan-3d-3.1 with
-// face_count = 100000 and enable_pbr = true.
-//
-// If you'd rather point these at the full Flask backend
-// (POST /api/generate-glb with workflow "hunyuan31-text" / "hunyuan31-1view",
-// then poll /api/generation/job/:id), swap the fetch URLs below — the rest of
-// the app only cares about the { modelUrl, image, prompt } shape returned.
+// These are the calls into the generation backend: image generation
+// (Gemini / Minimax / Qwen) → image-to-3D mesh (Hunyuan 3.1, Tripo3D fallback).
+// The rest of the app only cares about the { modelUrl, image, prompt } shape
+// returned, so the backend providers can change without touching the client.
 //
 // Response shape (both calls):
 //   { modelUrl: string,   // GLB the GLTFLoader can fetch (proxied, same-origin)

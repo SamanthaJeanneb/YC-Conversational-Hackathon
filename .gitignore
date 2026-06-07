@@ -7,6 +7,15 @@ dist/
 
 # Large local scene/model assets (not versioned — load locally)
 *.glb
+*.gltf
+*.bin
+public/textures/
+
+# Demo world previews (do not commit)
+Dungeon Don't Commit View 1.jpg
+dungeon-dont-commit.jpg
+public/dungeon-dont-commit.jpg
+public/dungeon-dont-commit-view-1.jpg
 
 # Python (voice worker)
 voice/.venv/

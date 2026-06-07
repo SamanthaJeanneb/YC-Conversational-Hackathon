@@ -1,9 +1,9 @@
 {
-  "name": "fps-3d-builder",
+  "name": "worldvoice",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "First-person three.js scene with crosshair-driven Hunyuan 3.1 object generation/iteration (reuses the Suzanne3d pipeline).",
+  "description": "WorldVoice — speak 3D worlds into existence and iterate on them by voice (three.js).",
   "scripts": {
     "dev": "vite",
     "server": "node server/index.js",

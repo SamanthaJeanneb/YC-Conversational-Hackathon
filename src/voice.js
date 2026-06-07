@@ -9,7 +9,7 @@
 
 import { Room, RoomEvent, Track } from 'livekit-client';
 
-export function createVoice({ onCommand, onState }) {
+export function createVoice({ onCommand, onState, worldState }) {
   let room = null;
 
   const emit = (patch) => onState && onState(patch);
@@ -20,7 +20,10 @@ export function createVoice({ onCommand, onState }) {
     // dispatches a brand-new job per room, so each connection gets its own agent
     // bound to the current participant — toggling off→on (or a page reload) can
     // never land on a stale session that's deaf to the new participant.
-    const roomName = `studio-${Date.now().toString(36)}`;
+    // Tag the name "built" once a world exists so the agent skips the "what
+    // world would you like to build?" greeting on reconnects after a world exists.
+    const built = typeof worldState === 'function' && worldState();
+    const roomName = `studio-${built ? 'built-' : ''}${Date.now().toString(36)}`;
     const res = await fetch(`/api/voice-token?room=${encodeURIComponent(roomName)}`);
     if (!res.ok) {
       let msg = 'voice token request failed';
@@ -86,9 +89,26 @@ export function createVoice({ onCommand, onState }) {
     emit({ connected: false, agentSpeaking: false, userSpeaking: false });
   }
 
+  // Outbound message to the agent (same `scene` topic). Used to tell the agent a
+  // preview image is on screen so it can ask the user for approval by voice.
+  async function send(payload) {
+    if (!room) return false;
+    try {
+      await room.localParticipant.publishData(
+        new TextEncoder().encode(JSON.stringify(payload)),
+        { reliable: true, topic: 'scene' },
+      );
+      return true;
+    } catch (e) {
+      console.warn('[voice] send failed', e);
+      return false;
+    }
+  }
+
   return {
     connect,
     disconnect,
+    send,
     isConnected: () => !!room,
     async toggle() {
       if (this.isConnected()) await disconnect();

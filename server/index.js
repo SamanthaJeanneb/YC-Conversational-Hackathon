@@ -1,31 +1,22 @@
 // ─────────────────────────────────────────────────────────────────────────
 //  Lean generation proxy.
 //
-//  Reuses the Suzanne3d pipeline pieces WITHOUT the Flask/Supabase/Stripe
-//  weight: Gemini image generation → Replicate Hunyuan 3.1 (100k faces, PBR).
-//
-//  Secrets are READ FROM the existing config (never hardcoded):
-//    ~/Desktop/suzanne3d-main/.env   →  GEMINI_API_KEY,
-//                                        REPLICATE_API_TOKEN (or _API_KEY)
-//  A local ./.env (if present) overrides, so you can relocate keys later.
+//  Image generation (Gemini / Minimax / Qwen) → image-to-3D mesh
+//  (Hunyuan 3.1 on Replicate, with Tripo3D fallback). Secrets come from a
+//  local ./.env (never hardcoded).
 // ─────────────────────────────────────────────────────────────────────────
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import os from 'node:os';
-import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { GoogleGenAI, Type } from '@google/genai';
 import Replicate from 'replicate';
 import { AccessToken } from 'livekit-server-sdk';
 
-// Load the existing Suzanne config first, then any local .env on top.
-dotenv.config({ path: path.join(os.homedir(), 'Desktop', 'suzanne3d-main', '.env') });
 dotenv.config();
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-// suzanne's replicate_service.py reads REPLICATE_API_KEY; .env.example documents
-// REPLICATE_API_TOKEN. Accept either.
+// Accept REPLICATE_API_TOKEN or REPLICATE_API_KEY.
 const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN || process.env.REPLICATE_API_KEY || '';
 const PORT = process.env.PORT || 8787;
 
@@ -35,7 +26,7 @@ const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || '';
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || '';
 const VOICE_ROOM = process.env.VOICE_ROOM || 'studio';
 
-// Mirror suzanne3d-main/backend/view_generation.py image model preference order.
+// Image model preference order (first that returns an image wins).
 const IMAGE_GEN_MODELS = [
   'gemini-2.5-flash-image',
   'gemini-3.1-flash-image-preview',
@@ -67,8 +58,8 @@ async function geminiImage({ prompt, sourceImage }) {
     const { mimeType, data } = parseDataUri(sourceImage);
     parts.push({ inlineData: { mimeType, data } });
   }
-  // A compact single-hero instruction so Hunyuan gets a clean, depth-readable
-  // subject (same intent as the Suzanne single-image reconstruction prompt).
+  // A compact single-hero instruction so the image-to-3D step gets a clean,
+  // depth-readable subject.
   const guidance = sourceImage
     ? `Edit the attached object render: ${prompt}. Keep the same subject identity, ` +
       `centered on a neutral background, solid opaque 3D form with clear depth. ` +
@@ -157,7 +148,7 @@ async function imageGen({ prompt, sourceImage }) {
 }
 
 // ── Tripo3D: image data-URI → textured GLB url ─────────────────────────────
-// Ported from suzanne3d-main/backend/tripo_client.py. Flow: upload the image →
+// Flow: upload the image →
 // create an image_to_model task → poll until success → take the GLB url.
 const TRIPO_API_KEY = process.env.TRIPO_API_KEY;
 const TRIPO_BASE = 'https://api.tripo3d.ai/v2/openapi';

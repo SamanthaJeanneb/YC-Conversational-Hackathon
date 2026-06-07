@@ -86,6 +86,14 @@
       .panel .preview { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
       .panel .preview img { width: 48px; height: 48px; border-radius: 6px; object-fit: cover; border: 1px solid var(--panel-border); }
 
+      /* ── Iterate approval preview ────────────────────────────── */
+      #preview-panel { left: 50%; top: 24px; transform: translateX(-50%); min-width: 300px; max-width: 320px; }
+      #preview-panel img {
+        width: 100%; height: 200px; object-fit: contain; border-radius: 8px;
+        border: 1px solid var(--panel-border); background: rgba(0,0,0,0.35); margin-bottom: 4px;
+      }
+      #preview-panel.busy .row { opacity: 0.5; pointer-events: none; }
+
       /* ── Toast / status ──────────────────────────────────────── */
       #toast {
         position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
@@ -101,6 +109,107 @@
       }
       @keyframes spin { to { transform: rotate(360deg); } }
       .hidden { display: none !important; }
+
+      /* ── World build: preview/approval card ──────────────────── */
+      #world-card {
+        position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+        z-index: 60; width: min(860px, 92vw);
+        background: var(--panel-bg); border: 1px solid var(--panel-border);
+        border-radius: 14px; padding: 18px; backdrop-filter: blur(14px);
+        box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+      }
+      #world-card .wc-label {
+        font-size: 12px; color: var(--muted); text-transform: uppercase;
+        letter-spacing: 0.6px; margin-bottom: 12px;
+      }
+      #world-card .wc-images {
+        display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+      }
+      #world-card .wc-images img {
+        width: 100%; display: block; border-radius: 10px;
+        border: 1px solid var(--panel-border); aspect-ratio: 16 / 10; object-fit: cover;
+        background: #000;
+      }
+      /* When only one preview is available, span the full width. */
+      #world-card .wc-images.single { grid-template-columns: 1fr; }
+      #world-card .wc-prompt { font-size: 14px; color: var(--text); margin: 12px 2px 0; line-height: 1.45; }
+      #world-card .wc-row { display: flex; gap: 10px; margin-top: 16px; }
+      #world-card button {
+        flex: 1; padding: 11px 12px; border-radius: 9px; border: 1px solid transparent;
+        font: inherit; font-weight: 600; font-size: 14px; cursor: pointer;
+      }
+      #world-card button.primary { background: var(--accent); color: #06122a; }
+      #world-card button.primary:hover { background: #87b8ff; }
+      #world-card button.ghost { background: transparent; border-color: var(--panel-border); color: var(--muted); }
+      #world-card button.ghost:hover { color: var(--text); }
+
+      /* ── World build: full-screen loading overlay ────────────── */
+      #world-loading {
+        position: fixed; inset: 0; z-index: 70;
+        display: flex; align-items: center; justify-content: center;
+        flex-direction: column; gap: 18px;
+        background: radial-gradient(ellipse at center, rgba(8,10,18,0.82), rgba(2,3,6,0.95));
+        backdrop-filter: blur(4px);
+      }
+      #world-loading .wl-spinner {
+        width: 46px; height: 46px; border: 3px solid rgba(255,255,255,0.18);
+        border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite;
+      }
+      #world-loading .wl-text { font-size: 16px; font-weight: 600; letter-spacing: 0.3px; color: var(--text); }
+
+      /* ── Color picker (radial hue wheel + S/L panels) ────────── */
+      /* Transparent overlay: the 3D scene stays fully visible behind it so you
+         see the model recolor live. Only the picker pieces capture the mouse;
+         the rest of the screen is click-through. Drag the handle to reposition,
+         like suzanne3d-main's ColorPicker. */
+      #color-picker {
+        position: fixed; inset: 0; z-index: 80;
+        pointer-events: none; /* see-through; children opt back in below */
+      }
+      #color-picker.hidden { display: none; }
+      .cp-stage {
+        position: absolute; /* positioned at pos.x / pos.y, moved by drag */
+        transform: translate(-50%, -50%);
+        display: flex; align-items: center; gap: 28px;
+      }
+      .cp-stage > * { pointer-events: auto; }
+      .cp-wheel { position: relative; width: 280px; height: 280px; }
+      .cp-wheel svg { position: absolute; inset: 0; }
+      .cp-seg { cursor: pointer; transition: stroke 100ms ease-out; }
+      .cp-center {
+        position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        width: 56px; height: 56px; border-radius: 50%;
+        border: 2px solid var(--panel-border); cursor: pointer;
+        font: inherit; font-size: 14px; font-weight: 600;
+        display: flex; align-items: center; justify-content: center;
+        transition: background 100ms ease-out;
+      }
+      .cp-drag {
+        position: absolute; left: 50%; bottom: -34px; transform: translateX(-50%);
+        display: flex; align-items: center; gap: 6px; white-space: nowrap;
+        font-size: 10px; letter-spacing: 0.4px; color: var(--muted);
+        background: var(--panel-bg); border: 1px solid var(--panel-border);
+        border-radius: 6px; padding: 4px 8px; cursor: grab; user-select: none;
+        backdrop-filter: blur(12px);
+      }
+      .cp-drag.grabbing { cursor: grabbing; }
+      .cp-drag .cp-grip { letter-spacing: 2px; opacity: 0.6; }
+      .cp-panel {
+        background: var(--panel-bg); border: 1px solid var(--panel-border);
+        border-radius: 12px; padding: 14px 16px; width: 180px;
+        backdrop-filter: blur(12px); box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+      }
+      .cp-panel .cp-label {
+        font-size: 11px; color: var(--muted); text-transform: uppercase;
+        letter-spacing: 0.6px; margin-bottom: 10px;
+        display: flex; justify-content: space-between; align-items: center;
+      }
+      .cp-panel .cp-val { color: var(--accent); letter-spacing: 0; }
+      .cp-panel input[type="range"] { width: 100%; accent-color: var(--accent); cursor: pointer; }
+      .cp-swatch {
+        width: 100%; height: 20px; border-radius: 6px;
+        border: 1px solid var(--panel-border); margin-top: 12px;
+      }
 
       /* ── Voice toggle + indicator ────────────────────────────── */
       #voice {
@@ -142,7 +251,7 @@
         <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / arrows to walk &nbsp;·&nbsp; mouse to look<br />
         <kbd>V</kbd> turns on voice — then just talk: “make a red mug”, “make it bigger”, “warm sunset”<br />
         <kbd>Left-click</kbd> an object to select it &nbsp;·&nbsp; <kbd>Right-click</kbd> the ground to set a spawn point<br />
-        <kbd>G</kbd> to grab &amp; move an object &nbsp;·&nbsp; <kbd>Esc</kbd> to release
+        <kbd>G</kbd> to grab &amp; move an object &nbsp;·&nbsp; <kbd>M</kbd> to recolor it &nbsp;·&nbsp; <kbd>Esc</kbd> to release
       </div>
     </div>
 
@@ -152,7 +261,41 @@
       <span class="state" id="voice-state"></span>
     </div>
 
+    <!-- Iterate approval: the new image pops up here; approve to build the mesh -->
+    <div id="preview-panel" class="panel hidden">
+      <div class="label">Approve change?</div>
+      <div class="ctx" id="preview-ctx"></div>
+      <img id="preview-img" alt="proposed change preview" />
+      <div class="row">
+        <button class="primary" id="preview-approve">Build it</button>
+        <button class="ghost" id="preview-reject">Cancel</button>
+      </div>
+    </div>
+
     <div id="toast"></div>
+
+    <!-- Color picker: radial hue wheel + saturation/lightness panels (built in main.js) -->
+    <div id="color-picker" class="hidden"></div>
+
+    <!-- World build: preview the agent returns for the spoken world, to approve -->
+    <div id="world-card" class="hidden">
+      <div class="wc-label">Preview — build this world?</div>
+      <div id="world-card-images" class="wc-images">
+        <img id="world-card-img" alt="World preview 1" />
+        <img id="world-card-img-2" alt="World preview 2" />
+      </div>
+      <div id="world-card-prompt" class="wc-prompt"></div>
+      <div class="wc-row">
+        <button id="world-approve" class="primary">Build this world</button>
+        <button id="world-cancel" class="ghost">Cancel</button>
+      </div>
+    </div>
+
+    <!-- World build: loading sign while the environment loads -->
+    <div id="world-loading" class="hidden">
+      <div class="wl-spinner"></div>
+      <div class="wl-text">Building your world…</div>
+    </div>
 
     <script type="module" src="/src/main.js"></script>
   </body>

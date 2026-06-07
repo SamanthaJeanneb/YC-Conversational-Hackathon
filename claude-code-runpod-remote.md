@@ -9,7 +9,7 @@ Use Claude Code on your local machine to SSH into your RunPod A100 and run all H
 ## Step 1: Generate SSH Key (local)
 
 ```bash
-ssh-keygen -t ed25519 -C "yehor@suzanne3d.com" -f ~/.ssh/runpod
+ssh-keygen -t ed25519 -C "worldvoice-runpod" -f ~/.ssh/runpod
 # Hit enter twice (no passphrase for speed)
 ```
 
