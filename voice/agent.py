@@ -67,6 +67,39 @@ def _trim(text: str, limit: int = 60) -> str:
     return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + "…"
 
 
+# Filler the model often wraps a lighting request in. Stripped so the spoken
+# confirmation reads cleanly — "Setting warm lighting", not "Setting the
+# lighting lighting warm".
+_LIGHT_PREFIXES = (
+    "make the lighting", "set the lighting", "change the lighting",
+    "turn the lighting", "make the lights", "turn the lights",
+    "make it", "set it", "change it", "turn it",
+    "the lighting", "lighting", "the lights", "lights",
+    "everything", "make", "set", "change", "turn", "to",
+)
+
+
+def _light_confirm(description: str) -> str:
+    """Turn a free-form lighting description into a clean spoken confirmation."""
+    d = " ".join(description.split()).rstrip(".")
+    low = d.lower()
+    if any(w in low for w in ("reset", "default", "original", "back to normal")):
+        return "Resetting the lighting."
+    # Peel off any leading filler phrases (repeatedly, e.g. "make the lighting to warm").
+    changed = True
+    while changed and d:
+        changed = False
+        for p in _LIGHT_PREFIXES:
+            if low == p or low.startswith(p + " "):
+                d, low, changed = d[len(p):].strip(), d[len(p):].strip().lower(), True
+                break
+    # Drop a trailing "lighting"/"lights" so we don't double it when we re-add it.
+    for suf in (" lighting", " lights"):
+        if low.endswith(suf):
+            d = d[: -len(suf)].strip()
+    return f"Setting {d} lighting." if d else "Updating the lighting."
+
+
 class SceneRouter(Agent):
     """Routes spoken requests to browser scene functions via the data channel."""
 
@@ -152,10 +185,7 @@ class SceneRouter(Agent):
         'candlelit'), time of day ('sunset', 'midnight'), relative tweak ('warmer',
         'dimmer'), or a reset ('reset', 'default lighting', 'back to normal' — pass those
         words through). `description` is the user's own words, verbatim."""
-        low = description.lower()
-        is_reset = any(w in low for w in ("reset", "default", "original", "back to normal"))
-        confirm = "Resetting the lighting." if is_reset else f"Setting the lighting {description}."
-        await self._route(context, {"type": "lighting", "description": description}, confirm)
+        await self._route(context, {"type": "lighting", "description": description}, _light_confirm(description))
 
     @function_tool()
     async def ask_clarify(self, context: RunContext, question: str) -> None:
