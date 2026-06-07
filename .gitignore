@@ -5,6 +5,9 @@ dist/
 .DS_Store
 *.log
 
+# Large local scene/model assets (not versioned — load locally)
+*.glb
+
 # Python (voice worker)
 voice/.venv/
 __pycache__/
