@@ -280,6 +280,8 @@ renderer.domElement.addEventListener('mousedown', (e) => {
     if (hoverObjectId) {
       setSelected(hoverObjectId);
       toast('Selected — say the change (e.g. “make it bigger”)', false, 2400);
+    } else {
+      setSelected(null); // clicked empty space → deselect (clears the highlight)
     }
   } else if (e.button === 2) {
     if (grabbedId) { cancelGrab(); return; }
@@ -342,14 +344,11 @@ function clearPlacementMarker() {
 // ─────────────────────────────────────────────────────────────────────────
 // Core generate flow, callable from the voice layer.
 async function generateAt(prompt, placement) {
-  // Instant wireframe box, then swap to the image billboard once it arrives.
+  // Animated wireframe box stands in for the whole generation.
   let ph = addBoxPlaceholder(placement);
   toast(`Imagining “${prompt}”…`, true);
   try {
     const img = await generateImage({ prompt });
-    removePlaceholder(ph);
-    ph = addOutlineBillboard(placement, img.image); // fast shape preview (outline only)
-
     toast('Building 3D model…', true);
     const result = await imageToModel({ image: img.image, prompt: img.prompt || prompt });
     const id = store.nextId();
@@ -377,7 +376,10 @@ async function iterateOn(id, instruction) {
   const entry = store.get(id);
   if (!entry || !instruction) return;
   const placement = entry.placement.position.clone();
-  let ph = null;
+  const oldRoot = entry.root;
+  // The previous loaded model itself becomes the loading state (ghosted in place).
+  makeLoadingGhost(oldRoot);
+  let ghosted = true;
   toast(`Re-imagining: “${instruction}”…`, true);
   try {
     const img = await iterateImage({
@@ -385,19 +387,18 @@ async function iterateOn(id, instruction) {
       prompt: entry.prompt,
       instruction,
     });
-    ph = addOutlineBillboard(placement, img.image); // fast shape preview of the change (outline only)
-
     toast('Building 3D model…', true);
     const result = await imageToModel({ image: img.image, prompt: img.prompt || instruction });
     // Swap the model in place — keep the same world position.
     const newRoot = await loadModelAt(result.modelUrl, placement);
     newRoot.userData.objectId = id;
-    removePlaceholder(ph); ph = null;
 
-    // Remove the old root from scene + selectables.
-    scene.remove(entry.root);
-    disposeObject(entry.root);
-    const idx = selectables.indexOf(entry.root);
+    // Remove the old (ghosted) root from scene + selectables.
+    loadingPlaceholders.delete(oldRoot);
+    ghosted = false;
+    scene.remove(oldRoot);
+    disposeObject(oldRoot);
+    const idx = selectables.indexOf(oldRoot);
     if (idx >= 0) selectables.splice(idx, 1);
     selectables.push(newRoot);
 
@@ -410,7 +411,7 @@ async function iterateOn(id, instruction) {
     if (selectedId === id) { selectedId = null; setSelected(id); } // re-apply highlight
     toast('Object updated', false, 1800);
   } catch (err) {
-    removePlaceholder(ph);
+    if (ghosted) clearLoadingGhost(oldRoot); // restore the real model on failure
     console.error(err);
     toast(`Iterate failed: ${err.message}`, false, 4500);
   }
@@ -514,116 +515,72 @@ function loadModelAt(url, point) {
   });
 }
 
-// Placeholders pulse while their object generates.
+// Objects currently rendered in a "loading" state. The render loop pulses
+// every material's opacity (relative to a stashed base) so it's obvious
+// something is generating; box placeholders also rotate + breathe.
 const loadingPlaceholders = new Set();
 
-// Stage 1 (instant): a soft wireframe cube where the object will appear, shown
-// for the few seconds before the preview image arrives.
+// Register an object so the render loop animates it. Stashes each material's
+// base opacity once so the pulse multiplies rather than overwrites.
+function registerLoading(obj) {
+  obj.traverse((o) => {
+    const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
+    for (const m of mats) {
+      if (!m) continue;
+      m.transparent = true;
+      if (m.userData._baseOp === undefined) m.userData._baseOp = m.opacity;
+    }
+  });
+  loadingPlaceholders.add(obj);
+}
+
+// GENERATE placeholder: a glowing wireframe cube (the "square" you liked) with a
+// breathing inner core, rotating + pulsing so it clearly reads as "loading."
 function addBoxPlaceholder(point) {
-  const g = new THREE.BoxGeometry(MODEL_TARGET_SIZE, MODEL_TARGET_SIZE, MODEL_TARGET_SIZE);
-  const m = new THREE.MeshStandardMaterial({
-    color: 0x6ea8ff, transparent: true, opacity: 0.18, roughness: 0.4,
-    emissive: 0x16407a, emissiveIntensity: 0.6, wireframe: true,
-  });
-  const mesh = new THREE.Mesh(g, m);
-  mesh.position.set(point.x, point.y + MODEL_TARGET_SIZE / 2, point.z);
-  mesh.userData._placeholder = true;
-  scene.add(mesh);
-  return mesh;
+  const size = MODEL_TARGET_SIZE;
+  const group = new THREE.Group();
+
+  const outer = new THREE.Mesh(
+    new THREE.BoxGeometry(size, size, size),
+    new THREE.MeshBasicMaterial({ color: 0x6ea8ff, wireframe: true, transparent: true, opacity: 0.8, depthWrite: false }),
+  );
+  const inner = new THREE.Mesh(
+    new THREE.BoxGeometry(size * 0.55, size * 0.55, size * 0.55),
+    new THREE.MeshBasicMaterial({ color: 0x6ea8ff, transparent: true, opacity: 0.22, depthWrite: false }),
+  );
+  group.add(outer, inner);
+  group.position.set(point.x, point.y + size / 2, point.z);
+  group.userData._loadingBox = true;
+  group.userData._inner = inner;
+  scene.add(group);
+  registerLoading(group);
+  return group;
 }
 
-// Trace the object's outline from the preview image: silhouette boundary
-// (foreground-vs-background) + internal edges (Sobel), drawn in accent blue on
-// a transparent canvas — a wireframe-style line sketch of the shape, not the
-// full picture. Returns { canvas, aspect }.
-const OUTLINE_RGB = [110, 168, 255]; // #6ea8ff, matches the box placeholder
-function buildOutlineTexture(dataURI) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      try {
-        const maxDim = 320; // downscale for speed; lines stay crisp on a sprite
-        const s = Math.min(1, maxDim / Math.max(img.width, img.height));
-        const w = Math.max(1, Math.round(img.width * s));
-        const h = Math.max(1, Math.round(img.height * s));
-
-        const src = document.createElement('canvas');
-        src.width = w; src.height = h;
-        const sctx = src.getContext('2d', { willReadFrequently: true });
-        sctx.drawImage(img, 0, 0, w, h);
-        const d = sctx.getImageData(0, 0, w, h).data;
-
-        // Background colour estimated from the four corners.
-        const gray = new Float32Array(w * h);
-        const fg = new Uint8Array(w * h);
-        const corners = [[0, 0], [w - 1, 0], [0, h - 1], [w - 1, h - 1]];
-        let br = 0, bg = 0, bb = 0;
-        for (const [cx, cy] of corners) { const i = (cy * w + cx) * 4; br += d[i]; bg += d[i + 1]; bb += d[i + 2]; }
-        br /= 4; bg /= 4; bb /= 4;
-        for (let p = 0; p < w * h; p++) {
-          const i = p * 4, r = d[i], g = d[i + 1], b = d[i + 2];
-          gray[p] = 0.299 * r + 0.587 * g + 0.114 * b;
-          fg[p] = (Math.abs(r - br) + Math.abs(g - bg) + Math.abs(b - bb)) > 60 ? 1 : 0;
-        }
-
-        const out = document.createElement('canvas');
-        out.width = w; out.height = h;
-        const octx = out.getContext('2d');
-        const o = octx.createImageData(w, h);
-        const GX = [-1, 0, 1, -2, 0, 2, -1, 0, 1];
-        const GY = [-1, -2, -1, 0, 0, 0, 1, 2, 1];
-        const INTERNAL = 70; // Sobel threshold for interior detail lines
-        for (let y = 1; y < h - 1; y++) {
-          for (let x = 1; x < w - 1; x++) {
-            const p = y * w + x;
-            let sx = 0, sy = 0, k = 0;
-            for (let j = -1; j <= 1; j++) for (let i2 = -1; i2 <= 1; i2++) {
-              const v = gray[(y + j) * w + (x + i2)]; sx += v * GX[k]; sy += v * GY[k]; k++;
-            }
-            const mag = Math.hypot(sx, sy);
-            // Silhouette: a foreground pixel touching the background.
-            const sil = fg[p] && (!fg[p - 1] || !fg[p + 1] || !fg[p - w] || !fg[p + w]);
-            let a = 0;
-            if (sil) a = 255;
-            else if (fg[p] && mag > INTERNAL) a = Math.min(255, (mag - INTERNAL) * 2.2);
-            const oi = p * 4;
-            o.data[oi] = OUTLINE_RGB[0]; o.data[oi + 1] = OUTLINE_RGB[1];
-            o.data[oi + 2] = OUTLINE_RGB[2]; o.data[oi + 3] = a;
-          }
-        }
-        octx.putImageData(o, 0, 0);
-        resolve({ canvas: out, aspect: w / h });
-      } catch (e) { reject(e); }
-    };
-    img.onerror = () => reject(new Error('outline image load failed'));
-    img.src = dataURI;
+// ITERATE placeholder: turn the ALREADY-LOADED model into a translucent accent
+// "ghost" of itself, in place, so the loading shape is the real previous model
+// (not an image). Original materials are stashed for restore-on-error.
+function makeLoadingGhost(root) {
+  root.traverse((o) => {
+    if (!o.isMesh) return;
+    o.userData._ghostStash = o.material;
+    o.material = new THREE.MeshBasicMaterial({
+      color: 0x6ea8ff, transparent: true, opacity: 0.32, depthWrite: false,
+    });
   });
+  registerLoading(root);
 }
 
-// Stage 2 (fast, ~seconds): the traced outline as a camera-facing billboard —
-// just the shape's lines, standing in until the GLB is ready.
-function addOutlineBillboard(point, dataURI) {
-  const mat = new THREE.SpriteMaterial({ transparent: true, opacity: 0.95, depthWrite: false });
-  const sprite = new THREE.Sprite(mat);
-  const base = MODEL_TARGET_SIZE * 1.25;
-  sprite.scale.set(base, base, 1);
-  sprite.position.set(point.x, point.y + base / 2, point.z);
-  sprite.userData._placeholder = true;
-  scene.add(sprite);
-  loadingPlaceholders.add(sprite);
-
-  buildOutlineTexture(dataURI).then(({ canvas, aspect }) => {
-    if (!loadingPlaceholders.has(sprite)) return; // already removed
-    const tex = new THREE.CanvasTexture(canvas);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    mat.map = tex;
-    mat.needsUpdate = true;
-    const wsc = base * aspect;
-    sprite.scale.set(wsc, base, 1);
-    sprite.position.y = point.y + base / 2;
-  }).catch((err) => console.warn('[outline]', err.message));
-
-  return sprite;
+// Restore a ghosted model to its real materials (used if iteration fails).
+function clearLoadingGhost(root) {
+  loadingPlaceholders.delete(root);
+  root.traverse((o) => {
+    if (o.isMesh && o.userData._ghostStash) {
+      o.material.dispose?.();
+      o.material = o.userData._ghostStash;
+      delete o.userData._ghostStash;
+    }
+  });
 }
 
 function removePlaceholder(obj) {
@@ -692,10 +649,22 @@ function animate() {
     if (grabbedId) grabUpdate();
   }
 
-  // Pulse loading billboards so they read as "generating," not placed.
+  // Animate loading placeholders so it's obvious something is generating:
+  // strong opacity pulse on every material, plus rotate + breathe the box.
   if (loadingPlaceholders.size) {
-    const pulse = 0.78 + 0.18 * Math.sin(clock.elapsedTime * 4);
-    loadingPlaceholders.forEach((s) => { if (s.material) s.material.opacity = pulse; });
+    const t = clock.elapsedTime;
+    const f = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(t * 4.5)); // ~0.35 .. 1.0
+    loadingPlaceholders.forEach((obj) => {
+      obj.traverse((o) => {
+        const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
+        for (const m of mats) if (m && m.userData._baseOp !== undefined) m.opacity = m.userData._baseOp * f;
+      });
+      if (obj.userData._loadingBox) {
+        obj.rotation.y += dt * 0.9;
+        const s = 1 + 0.16 * Math.sin(t * 5);
+        obj.userData._inner.scale.setScalar(s);
+      }
+    });
   }
 
   renderer.render(scene, camera);
