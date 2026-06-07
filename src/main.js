@@ -105,31 +105,22 @@ const keys = { forward: false, back: false, left: false, right: false };
 const velocity = new THREE.Vector3();
 const direction = new THREE.Vector3();
 
-// menuOpen suppresses re-locking while a panel is open so the user can type.
-let menuOpen = false;
-
 controls.addEventListener('lock', () => {
   lockHint.classList.add('hidden');
   crosshair.classList.add('active');
 });
 controls.addEventListener('unlock', () => {
   crosshair.classList.remove('active');
-  // Esc / programmatic unlock: only show the click-to-enter hint if no panel
-  // is driving the unlock (panels need the cursor free for typing).
-  if (!menuOpen) lockHint.classList.remove('hidden');
+  lockHint.classList.remove('hidden');
   // Esc while carrying → cancel the move, snapping the object back.
-  if (grabbedId && !menuOpen) cancelGrab();
+  if (grabbedId) cancelGrab();
   // Released → drop movement so we don't keep gliding.
   keys.forward = keys.back = keys.left = keys.right = false;
 });
 
-lockHint.addEventListener('click', () => {
-  if (!menuOpen) controls.lock();
-});
+lockHint.addEventListener('click', () => controls.lock());
 
 window.addEventListener('keydown', (e) => {
-  if (menuOpen) return; // let the panel inputs handle typing
-  if (e.code === 'KeyL') { openLightingPanel(); return; }
   if (e.code === 'KeyG') { toggleGrab(); return; }
   if (e.code === 'KeyV') { voiceEl.click(); return; }
   switch (e.code) {
@@ -276,23 +267,25 @@ function dropGrab(commit) {
 function cancelGrab() { if (grabbedId) dropGrab(false); }
 
 // ─────────────────────────────────────────────────────────────────────────
-//  Mouse: left = select+iterate (or place when carrying), right = generate menu
+//  Mouse: clicks only TARGET — generation/iteration happen by voice (LiveKit).
+//    left-click  = select the object under the crosshair (iterate target)
+//    right-click = drop a placement marker (where the next spoken object spawns)
+//    (left/right also place/cancel a carried object when grabbing)
 // ─────────────────────────────────────────────────────────────────────────
 renderer.domElement.addEventListener('mousedown', (e) => {
-  if (!controls.isLocked || menuOpen) return;
+  if (!controls.isLocked) return;
 
   if (e.button === 0) {
-    // Left-click: place the carried object, else select the one under the crosshair.
     if (grabbedId) { dropGrab(true); return; }
     if (hoverObjectId) {
       setSelected(hoverObjectId);
-      openIteratePanel(hoverObjectId);
+      toast('Selected — say the change (e.g. “make it bigger”)', false, 2400);
     }
   } else if (e.button === 2) {
-    // Right-click: cancel a carry, else open Generate menu at the crosshair.
     if (grabbedId) { cancelGrab(); return; }
     const point = hoverPoint ? hoverPoint.clone() : groundPointAhead();
-    openGeneratePanel(point);
+    setPlacementMarker(point);
+    toast('Spawn point set — say what to create (e.g. “a red mug”)', false, 2600);
   }
 });
 // Suppress the browser context menu so right-click is ours.
@@ -315,93 +308,39 @@ function clampToRoom(p) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-//  Panels (release pointer lock while open so the user can type)
+//  Placement marker — where the next voice-spawned object lands (right-click)
 // ─────────────────────────────────────────────────────────────────────────
-const genPanel = document.getElementById('generate-panel');
-const genInput = document.getElementById('generate-input');
-const genGo = document.getElementById('generate-go');
-const genCancel = document.getElementById('generate-cancel');
-
-const itPanel = document.getElementById('iterate-panel');
-const itInput = document.getElementById('iterate-input');
-const itThumb = document.getElementById('iterate-thumb');
-const itCtx = document.getElementById('iterate-ctx');
-const itGo = document.getElementById('iterate-go');
-const itCancel = document.getElementById('iterate-cancel');
-
-const lightPanel = document.getElementById('lighting-panel');
-const lightInput = document.getElementById('lighting-input');
-const lightGo = document.getElementById('lighting-go');
-const lightCancel = document.getElementById('lighting-cancel');
-
 let pendingPlacement = null; // world point captured at right-click time
+let placementMarker = null;  // floor ring showing it
 
-function openPanel(panel, input) {
-  menuOpen = true;
-  if (controls.isLocked) controls.unlock();
-  lockHint.classList.add('hidden');
-  panel.classList.remove('hidden');
-  setTimeout(() => input && input.focus(), 0);
+function setPlacementMarker(point) {
+  clearPlacementMarker();
+  pendingPlacement = point.clone();
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.28, 0.42, 40),
+    new THREE.MeshBasicMaterial({ color: 0x6ea8ff, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false }),
+  );
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.set(point.x, point.y + 0.02, point.z);
+  ring.userData._marker = true;
+  scene.add(ring);
+  placementMarker = ring;
 }
 
-function closePanels(relock = true) {
-  genPanel.classList.add('hidden');
-  itPanel.classList.add('hidden');
-  lightPanel.classList.add('hidden');
-  menuOpen = false;
-  if (relock) controls.lock();
-  else lockHint.classList.remove('hidden');
-}
-
-function openGeneratePanel(point) {
-  pendingPlacement = point;
-  genInput.value = '';
-  openPanel(genPanel, genInput);
-}
-
-function openIteratePanel(id) {
-  const entry = store.get(id);
-  if (!entry) return;
-  itInput.value = '';
-  itThumb.src = entry.sourceImage || '';
-  itThumb.style.display = entry.sourceImage ? 'block' : 'none';
-  itCtx.textContent = entry.prompt ? `“${entry.prompt}”` : 'Generated object';
-  openPanel(itPanel, itInput);
-}
-
-function openLightingPanel() {
-  lightInput.value = '';
-  openPanel(lightPanel, lightInput);
-}
-
-genCancel.addEventListener('click', () => closePanels(true));
-itCancel.addEventListener('click', () => { setSelected(null); closePanels(true); });
-lightCancel.addEventListener('click', () => closePanels(true));
-
-genGo.addEventListener('click', runGenerate);
-itGo.addEventListener('click', runIterate);
-lightGo.addEventListener('click', runLighting);
-
-// Submit on Enter (Shift+Enter = newline); Esc closes a panel.
-for (const [input, run] of [[genInput, runGenerate], [itInput, runIterate], [lightInput, runLighting]]) {
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); run(); }
-    else if (e.key === 'Escape') { e.preventDefault(); setSelected(null); closePanels(true); }
-  });
+function clearPlacementMarker() {
+  if (placementMarker) {
+    scene.remove(placementMarker);
+    placementMarker.geometry.dispose();
+    placementMarker.material.dispose();
+    placementMarker = null;
+  }
+  pendingPlacement = null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-//  Generate / iterate flows
+//  Generate / iterate / lighting flows (triggered by the voice layer)
 // ─────────────────────────────────────────────────────────────────────────
-function runGenerate() {
-  const prompt = genInput.value.trim();
-  if (!prompt) { genInput.focus(); return; }
-  const placement = pendingPlacement ? pendingPlacement.clone() : groundPointAhead();
-  closePanels(true);
-  generateAt(prompt, placement);
-}
-
-// Core generate flow, callable from the UI or the voice layer.
+// Core generate flow, callable from the voice layer.
 async function generateAt(prompt, placement) {
   // Instant wireframe box, then swap to the image billboard once it arrives.
   let ph = addBoxPlaceholder(placement);
@@ -433,17 +372,7 @@ async function generateAt(prompt, placement) {
   }
 }
 
-function runIterate() {
-  if (!selectedId) return;
-  const entry = store.get(selectedId);
-  const instruction = itInput.value.trim();
-  if (!entry || !instruction) { itInput.focus(); return; }
-  const id = selectedId;
-  closePanels(true);
-  iterateOn(id, instruction);
-}
-
-// Core iterate flow, callable from the UI or the voice layer.
+// Core iterate flow, callable from the voice layer.
 async function iterateOn(id, instruction) {
   const entry = store.get(id);
   if (!entry || !instruction) return;
@@ -529,14 +458,7 @@ function applyLighting(cfg) {
   if (Number.isFinite(cfg.exposure)) renderer.toneMappingExposure = clamp(cfg.exposure, 0.1, 3);
 }
 
-function runLighting() {
-  const prompt = lightInput.value.trim();
-  if (!prompt) { lightInput.focus(); return; }
-  closePanels(true);
-  applyLightingPrompt(prompt);
-}
-
-// Core lighting flow, callable from the UI or the voice layer.
+// Core lighting flow, callable from the voice layer.
 async function applyLightingPrompt(prompt) {
   toast(`Lighting: “${prompt}”…`, true);
   try {
@@ -800,9 +722,13 @@ const voiceState = document.getElementById('voice-state');
 function handleVoiceCommand(msg) {
   if (!msg || !msg.type) return;
   switch (msg.type) {
-    case 'generate':
-      generateAt(msg.prompt || 'an object', groundPointAhead()); // placed in front of the player
+    case 'generate': {
+      // Spawn at the right-click placement marker if one is set, else in front of the player.
+      const placement = pendingPlacement ? pendingPlacement.clone() : groundPointAhead();
+      clearPlacementMarker();
+      generateAt(msg.prompt || 'an object', placement);
       break;
+    }
     case 'iterate': {
       const id = selectedId || hoverObjectId;
       if (!id) { toast('Look at or select an object first', false, 2600); break; }

@@ -30,16 +30,19 @@ Check the backend is wired up: http://localhost:8787/api/health
 
 ## Controls
 
+Generation, iteration, and lighting are **voice-controlled** (LiveKit) — there
+is no text/chat interface. Clicks only *target*; you speak the rest.
+
 | Action | |
 |---|---|
 | Enter | Click the scene to lock the pointer |
 | Move | `W A S D` / arrow keys (grounded, eye height 1.6) |
 | Look | Mouse |
-| **Iterate** | **Left-click** an object → inline iterate control |
-| **Generate** | **Right-click** the ground/surface → generate menu (placed at the crosshair) |
+| **Voice** | `V` or the **Voice** button → always-listening control (see `voice/`) |
+| **Generate** | **Right-click** the ground to set a spawn marker, then say *"a red mug"* (no marker → spawns in front of you) |
+| **Iterate** | **Left-click** an object to select it, then say *"make it bigger"* / *"add a handle"* |
+| **Lighting** | say *"warm sunset"* / *"dim and moody"* |
 | **Move** | `G` to grab the object under the crosshair; it follows you — **left-click** to place, **right-click**/`Esc` to cancel |
-| **Lighting** | `L` → describe the lighting in natural language; applied live |
-| **Voice** | `V` or the **Voice** button → always-listening voice control (see `voice/`) |
 | Release | `Esc` |
 
 While an object generates, a fast **outline placeholder** (silhouette + edges traced
@@ -50,7 +53,7 @@ While a menu is open the pointer unlocks so you can type; it re-locks on close.
 ## Architecture
 
 - `src/main.js` — the whole three.js app (room, first-person controls, crosshair
-  raycast, panels, generate/iterate flows, model loading).
+  raycast, click-targeting, generate/iterate/lighting flows, model loading).
 - `src/pipeline.js` — the two clearly-marked async calls into the backend
   (`generateObject`, `iterateObject`). **Swap the endpoints here** if you want to
   point at the full Flask backend (`/api/generate-glb` + job polling) instead.
