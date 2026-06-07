@@ -84,7 +84,10 @@ class SceneRouter(Agent):
                 "wings', 'turn it metallic') -> iterate_object with only the change.\n"
                 "- Mood / ambiance / light requests ('warmer', 'sunset', 'dim it') -> "
                 "set_lighting with the description.\n"
-                "If nothing matches, do nothing."
+                "Call exactly ONE tool per request, and only ONCE. Never repeat a "
+                "previous action. If you don't clearly hear a NEW actionable request "
+                "(e.g. silence, filler, or your own confirmation echoing back), call "
+                "no tool and stay silent."
             ),
         )
         self.room = None  # set in entrypoint once we have the JobContext
@@ -144,8 +147,10 @@ class SceneRouter(Agent):
 
     # ── keep context short for speed (last few turns only) ──────────────────
     async def on_user_turn_completed(self, turn_ctx, new_message):  # noqa: ANN001
+        # Keep almost no history: each command is independent, and remembering the
+        # last generation makes the model re-issue it on stray/echo turns.
         try:
-            items = turn_ctx.items[-6:]
+            items = turn_ctx.items[-2:]
             await self.update_chat_ctx(turn_ctx.copy(items=items))
         except Exception as e:  # never let truncation break a turn
             logger.debug("ctx truncation skipped: %s", e)
@@ -173,6 +178,8 @@ async def entrypoint(ctx: JobContext):
         # Semantic, multilingual end-of-turn detection (responds when you stop,
         # not on a fixed silence timeout). Barge-in is on by default.
         turn_detection=MultilingualModel(),
+        # One tool call per turn — never chain or repeat within a turn.
+        max_tool_steps=1,
     )
 
     agent = SceneRouter()

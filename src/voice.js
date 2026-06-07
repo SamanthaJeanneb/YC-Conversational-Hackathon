@@ -24,7 +24,13 @@ export function createVoice({ onCommand, onState }) {
     }
     const { url, token } = await res.json();
 
-    room = new Room({ adaptiveStream: true, dynacast: true });
+    room = new Room({
+      adaptiveStream: true,
+      dynacast: true,
+      // Suppress the agent's own TTS / room audio from re-entering the mic,
+      // which otherwise creates phantom turns that re-trigger generation.
+      audioCaptureDefaults: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
 
     // Play the agent's TTS the instant its audio track arrives.
     room.on(RoomEvent.TrackSubscribed, (track) => {

@@ -687,27 +687,55 @@ const voiceEl = document.getElementById('voice');
 const voiceOnOff = document.getElementById('voice-onoff');
 const voiceState = document.getElementById('voice-state');
 
+// Dedupe guard: the voice agent can re-fire the same command (mic echo of its
+// own TTS, turn splitting). Drop a command that's already running or that fired
+// moments ago, so one spoken request generates exactly once.
+const inFlightCmds = new Set();   // keys currently executing
+const recentCmds = new Map();     // key -> last-fired timestamp (ms)
+const DEDUPE_WINDOW_MS = 12000;
+function isDuplicateCommand(key) {
+  const now = performance.now();
+  if (inFlightCmds.has(key)) return true;
+  const last = recentCmds.get(key);
+  recentCmds.set(key, now);
+  return last !== undefined && now - last < DEDUPE_WINDOW_MS;
+}
+function runOnce(key, promise) {
+  inFlightCmds.add(key);
+  Promise.resolve(promise).finally(() => inFlightCmds.delete(key));
+}
+
 // Map an inbound agent command onto the existing scene functions.
 function handleVoiceCommand(msg) {
   if (!msg || !msg.type) return;
   switch (msg.type) {
     case 'generate': {
+      const prompt = msg.prompt || 'an object';
+      const key = `generate:${prompt.toLowerCase().trim()}`;
+      if (isDuplicateCommand(key)) { console.warn('[voice] ignored duplicate generate:', prompt); break; }
       // Spawn at the right-click placement marker if one is set, else in front of the player.
       const placement = pendingPlacement ? pendingPlacement.clone() : groundPointAhead();
       clearPlacementMarker();
-      generateAt(msg.prompt || 'an object', placement);
+      runOnce(key, generateAt(prompt, placement));
       break;
     }
     case 'iterate': {
       const id = selectedId || hoverObjectId;
       if (!id) { toast('Look at or select an object first', false, 2600); break; }
+      const instruction = msg.instruction || '';
+      const key = `iterate:${id}:${instruction.toLowerCase().trim()}`;
+      if (isDuplicateCommand(key)) { console.warn('[voice] ignored duplicate iterate:', instruction); break; }
       setSelected(id);
-      iterateOn(id, msg.instruction || '');
+      runOnce(key, iterateOn(id, instruction));
       break;
     }
-    case 'lighting':
-      applyLightingPrompt(msg.description || '');
+    case 'lighting': {
+      const description = msg.description || '';
+      const key = `lighting:${description.toLowerCase().trim()}`;
+      if (isDuplicateCommand(key)) { console.warn('[voice] ignored duplicate lighting:', description); break; }
+      runOnce(key, applyLightingPrompt(description));
       break;
+    }
     case 'queue_world': // STUB — wire worldgen later
       toast(`(stub) queue world: “${msg.prompt || ''}”`, false, 2600);
       break;
