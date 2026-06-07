@@ -57,14 +57,14 @@ logger = logging.getLogger("voice-router")
 
 DATA_TOPIC = "scene"  # the browser listens for commands on this topic
 
-# Fixed confirmations — spoken straight to TTS, never composed by the LLM.
-CONFIRM = {
-    "generate": "generating now",
-    "iterate": "on it",
-    "lighting": "got it",
-    "queue_world": "queuing that world",
-    "retrieve": "looking that up",
-}
+# Confirmations are short and SPECIFIC — they echo what the user asked for so
+# they know exactly what's happening, but they're built by templating (no second
+# LLM round-trip, so no added latency). Clarifying questions are the one case
+# where the model composes its own words.
+def _trim(text: str, limit: int = 60) -> str:
+    """Keep spoken confirmations short — echo the subject, not an essay."""
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + "…"
 
 
 class SceneRouter(Agent):
@@ -76,18 +76,38 @@ class SceneRouter(Agent):
                 "You are the voice control layer for a first-person 3D scene "
                 "builder. Convert each spoken request into exactly ONE tool call. "
                 "Pick the single best tool and fill its arguments from what the user "
-                "said. Do NOT write any spoken reply or commentary — the tools speak "
-                "their own short confirmations.\n"
+                "said. Do NOT free-narrate — the action tools speak their own short "
+                "confirmation, and the one time you choose your own words is ask_clarify.\n"
                 "- 'make / create / add / spawn / generate X' -> generate_object with "
                 "a concise visual prompt (just the subject, e.g. 'a red ceramic mug').\n"
                 "- A change to the object already in focus ('make it bigger', 'add "
                 "wings', 'turn it metallic') -> iterate_object with only the change.\n"
-                "- Mood / ambiance / light requests ('warmer', 'sunset', 'dim it') -> "
-                "set_lighting with the description.\n"
-                "Call exactly ONE tool per request, and only ONCE. Never repeat a "
-                "previous action. If you don't clearly hear a NEW actionable request "
-                "(e.g. silence, filler, or your own confirmation echoing back), call "
-                "no tool and stay silent."
+                "- Mood / ambiance / light requests -> set_lighting with the description. "
+                "ANY request about the scene's light, brightness, color, atmosphere, "
+                "time of day, or mood goes here — pass the user's own words as the "
+                "description so the scene can interpret them freely. This includes any "
+                "color ('make it red', 'very yellow', 'deep blue'), named scenes or vibes "
+                "('underwater', 'nightclub', 'candlelit', 'horror', 'sunset on mars'), "
+                "relative tweaks ('warmer', 'cooler', 'dimmer', 'brighter'), AND resets "
+                "('reset the lighting', 'default lighting', 'back to normal' — pass these "
+                "through verbatim). The words 'lighting' / 'light' / 'warmer' / 'dimmer' / "
+                "'reset' ALWAYS mean set_lighting, even when phrased as 'make the lighting "
+                "…' — never route those to iterate_object.\n"
+                "CLARIFY when underspecified: if the user names a bare object with no "
+                "material, style, color, or other distinguishing detail (just 'a chair', "
+                "'a table', 'a car'), call ask_clarify ONCE with a brief question naming "
+                "the 1-2 most useful dimensions to pin down (e.g. 'What kind of chair — "
+                "and what material?'). The moment the user adds ANY detail, stop asking "
+                "and call generate_object. Ask at most one clarifying question per object; "
+                "if they decline or stay vague, just generate something reasonable.\n"
+                "Call exactly ONE tool per request. Each spoken request is INDEPENDENT: "
+                "if the user changes something you just set — lighting yellow then 'make "
+                "it red', 'bigger' then 'smaller', one object then another — that is a "
+                "NEW request and you MUST run the tool again, even if it's the same tool "
+                "you used last turn and even if it appears in the history above. Changing "
+                "a value to a different value is never a repeat. Only call NO tool and "
+                "stay silent when there is genuinely no new request: silence, filler, or "
+                "the exact words of your own confirmation echoing back."
             ),
         )
         self.room = None  # set in entrypoint once we have the JobContext
@@ -103,11 +123,11 @@ class SceneRouter(Agent):
             topic=DATA_TOPIC,
         )
 
-    # Publish to the browser, then speak the fixed confirmation in parallel, then
-    # stop so the LLM doesn't add its own reply.
-    async def _route(self, context: RunContext, payload: dict, confirm_key: str) -> None:
+    # Publish to the browser, then speak the confirmation in parallel, then stop
+    # so the LLM doesn't add its own reply. `confirm` already echoes the request.
+    async def _route(self, context: RunContext, payload: dict, confirm: str) -> None:
         await self._publish(payload)  # visual change starts immediately
-        context.session.say(CONFIRM[confirm_key], allow_interruptions=True, add_to_chat_ctx=False)
+        context.session.say(_trim(confirm), allow_interruptions=True, add_to_chat_ctx=False)
         raise StopResponse()
 
     # ── tools (the router) ─────────────────────────────────────────────────
@@ -116,42 +136,61 @@ class SceneRouter(Agent):
         """Create a brand-new 3D object in the scene from a short visual description.
         Use for make / create / add / spawn / generate requests. The browser places
         it in front of the player. `prompt` is just the subject, e.g. 'a potted cactus'."""
-        await self._route(context, {"type": "generate", "prompt": prompt}, "generate")
+        await self._route(context, {"type": "generate", "prompt": prompt}, f"Making {prompt}.")
 
     @function_tool()
     async def iterate_object(self, context: RunContext, instruction: str) -> None:
         """Modify the object currently selected / looked at. Use for changes to an
         existing object ('make it bigger', 'add a handle', 'turn it red'). `instruction`
         is only the change, not the original description."""
-        await self._route(context, {"type": "iterate", "instruction": instruction}, "iterate")
+        await self._route(context, {"type": "iterate", "instruction": instruction}, f"Got it — {instruction}.")
 
     @function_tool()
     async def set_lighting(self, context: RunContext, description: str) -> None:
-        """Change the scene lighting / mood. Use for lighting, ambiance, time-of-day,
-        or color-temperature requests ('warm sunset', 'dim and moody', 'bright studio')."""
-        await self._route(context, {"type": "lighting", "description": description}, "lighting")
+        """Change the scene lighting / mood / atmosphere to ANYTHING the user describes:
+        any color ('red', 'very yellow'), named scene ('underwater', 'nightclub',
+        'candlelit'), time of day ('sunset', 'midnight'), relative tweak ('warmer',
+        'dimmer'), or a reset ('reset', 'default lighting', 'back to normal' — pass those
+        words through). `description` is the user's own words, verbatim."""
+        low = description.lower()
+        is_reset = any(w in low for w in ("reset", "default", "original", "back to normal"))
+        confirm = "Resetting the lighting." if is_reset else f"Setting the lighting {description}."
+        await self._route(context, {"type": "lighting", "description": description}, confirm)
+
+    @function_tool()
+    async def ask_clarify(self, context: RunContext, question: str) -> None:
+        """Ask ONE short follow-up when a request is too vague to build well — e.g. the
+        user named a bare object with no material/style/color ('a chair' -> 'What kind of
+        chair, and what material?'). Speaks `question` and waits; publishes nothing. Use
+        sparingly: only when a detail genuinely changes the result, never more than once
+        per object. `question` must be a single concise spoken question."""
+        # Spoken in the model's own words; kept in context so it knows it already
+        # asked and can merge the user's answer with the original request.
+        context.session.say(_trim(question, 100), allow_interruptions=True, add_to_chat_ctx=True)
+        raise StopResponse()
 
     # ── stubs for later wiring (worldgen + Moss retrieval) ──────────────────
     @function_tool()
     async def queue_world(self, context: RunContext, prompt: str) -> None:
         """STUB (worldgen, to be wired later): queue generation of a whole environment
         / world from a description. Publishes the command; browser handling is TODO."""
-        await self._route(context, {"type": "queue_world", "prompt": prompt}, "queue_world")
+        await self._route(context, {"type": "queue_world", "prompt": prompt}, f"Queuing a {prompt} world.")
 
     @function_tool()
     async def retrieve_object(self, context: RunContext, query: str) -> None:
         """STUB (Moss retrieval, to be wired later): find and bring in a previously
         created / stored object matching the query. Publishes the command; browser
         handling is TODO."""
-        await self._route(context, {"type": "retrieve", "query": query}, "retrieve")
+        await self._route(context, {"type": "retrieve", "query": query}, f"Looking up {query}.")
 
     # ── keep context short for speed (last few turns only) ──────────────────
     async def on_user_turn_completed(self, turn_ctx, new_message):  # noqa: ANN001
-        # Keep almost no history: each command is independent, and remembering the
-        # last generation makes the model re-issue it on stray/echo turns.
+        # Keep history short for speed, but enough that a clarify question and the
+        # user's answer survive together (so 'a chair' + 'wooden, dining' merge into
+        # one generate). Action confirmations aren't added to ctx, so this won't
+        # make the model re-issue a past generation on echo turns.
         try:
-            items = turn_ctx.items[-2:]
-            await self.update_chat_ctx(turn_ctx.copy(items=items))
+            await self.update_chat_ctx(turn_ctx.truncate(max_items=4))
         except Exception as e:  # never let truncation break a turn
             logger.debug("ctx truncation skipped: %s", e)
 
@@ -185,6 +224,11 @@ async def entrypoint(ctx: JobContext):
     agent = SceneRouter()
     agent.room = ctx.room  # tools publish via this
 
+    # Default close_on_disconnect=True: when the participant leaves (toggle off /
+    # reload), close the session so this job ends and the room is recycled. The
+    # browser opens a FRESH room on every connect, so each toggle-on gets a new
+    # job bound to the current participant — no stale, deaf sessions. (Brief
+    # network blips don't drop the participant; LiveKit resumes them transparently.)
     await session.start(agent=agent, room=ctx.room)
 
 

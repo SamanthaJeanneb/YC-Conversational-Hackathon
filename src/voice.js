@@ -16,7 +16,12 @@ export function createVoice({ onCommand, onState }) {
 
   async function connect() {
     // Mint a dev token from our proxy (never ships the LiveKit secret).
-    const res = await fetch('/api/voice-token');
+    // Use a FRESH room name every time voice is toggled on. The agent worker
+    // dispatches a brand-new job per room, so each connection gets its own agent
+    // bound to the current participant — toggling off→on (or a page reload) can
+    // never land on a stale session that's deaf to the new participant.
+    const roomName = `studio-${Date.now().toString(36)}`;
+    const res = await fetch(`/api/voice-token?room=${encodeURIComponent(roomName)}`);
     if (!res.ok) {
       let msg = 'voice token request failed';
       try { msg = (await res.json()).error || msg; } catch { /* noop */ }
