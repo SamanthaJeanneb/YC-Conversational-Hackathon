@@ -1,0 +1,5 @@
+# Voice worker dependencies.
+# Install with:  pip install -r requirements.txt
+# (equivalently: pip install "livekit-agents[deepgram,anthropic,minimax,silero,turn-detector]~=1.5" python-dotenv)
+livekit-agents[deepgram,anthropic,minimax,silero,turn-detector]~=1.5
+python-dotenv

@@ -17,6 +17,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { GoogleGenAI, Type } from '@google/genai';
 import Replicate from 'replicate';
+import { AccessToken } from 'livekit-server-sdk';
 
 // Load the existing Suzanne config first, then any local .env on top.
 dotenv.config({ path: path.join(os.homedir(), 'Desktop', 'suzanne3d-main', '.env') });
@@ -27,6 +28,12 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 // REPLICATE_API_TOKEN. Accept either.
 const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN || process.env.REPLICATE_API_KEY || '';
 const PORT = process.env.PORT || 8787;
+
+// LiveKit (for minting browser voice tokens). The agent uses the same creds.
+const LIVEKIT_URL = process.env.LIVEKIT_URL || '';
+const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || '';
+const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || '';
+const VOICE_ROOM = process.env.VOICE_ROOM || 'studio';
 
 // Mirror suzanne3d-main/backend/view_generation.py image model preference order.
 const IMAGE_GEN_MODELS = [
@@ -142,9 +149,29 @@ app.get('/api/health', (_req, res) => {
     ok: true,
     gemini: Boolean(ai),
     replicate: Boolean(replicate),
+    livekit: Boolean(LIVEKIT_URL && LIVEKIT_API_KEY && LIVEKIT_API_SECRET),
     model: HUNYUAN_MODEL,
     opts: HUNYUAN_OPTS,
   });
+});
+
+// Mint a short-lived browser token to join the voice room. The agent worker
+// auto-joins the same room (no agent_name => automatic dispatch).
+app.get('/api/voice-token', async (req, res) => {
+  if (!LIVEKIT_URL || !LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) {
+    return res.status(500).json({ error: 'LiveKit not configured (LIVEKIT_URL/API_KEY/API_SECRET)' });
+  }
+  try {
+    const room = (req.query.room || VOICE_ROOM).toString();
+    const identity = (req.query.identity || `user-${Date.now().toString(36)}`).toString();
+    const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, { identity, ttl: '1h' });
+    at.addGrant({ roomJoin: true, room, canPublish: true, canSubscribe: true, canPublishData: true });
+    const token = await at.toJwt();
+    res.json({ url: LIVEKIT_URL, token, room, identity });
+  } catch (e) {
+    console.error('[voice-token] error:', e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // GENERATE: text → image → Hunyuan 3.1 GLB
@@ -293,5 +320,7 @@ app.listen(PORT, () => {
   console.log(`\n  Generation proxy on http://localhost:${PORT}`);
   console.log(`  Gemini:    ${ai ? 'configured' : 'MISSING GEMINI_API_KEY'}`);
   console.log(`  Replicate: ${replicate ? 'configured' : 'MISSING REPLICATE_API_TOKEN'}`);
+  const lkOk = LIVEKIT_URL && LIVEKIT_API_KEY && LIVEKIT_API_SECRET;
+  console.log(`  LiveKit:   ${lkOk ? 'configured' : 'MISSING LIVEKIT_URL/API_KEY/API_SECRET (voice off)'}`);
   console.log(`  Model:     ${HUNYUAN_MODEL}  ${JSON.stringify(HUNYUAN_OPTS)}\n`);
 });

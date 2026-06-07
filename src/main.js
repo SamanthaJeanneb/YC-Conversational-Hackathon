@@ -4,6 +4,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { installMeshyLighting } from './lighting.js';
 import { generateImage, iterateImage, imageToModel, setLighting } from './pipeline.js';
 import * as store from './store.js';
+import { createVoice } from './voice.js';
 
 // ─────────────────────────────────────────────────────────────────────────
 //  Constants
@@ -130,6 +131,7 @@ window.addEventListener('keydown', (e) => {
   if (menuOpen) return; // let the panel inputs handle typing
   if (e.code === 'KeyL') { openLightingPanel(); return; }
   if (e.code === 'KeyG') { toggleGrab(); return; }
+  if (e.code === 'KeyV') { voiceEl.click(); return; }
   switch (e.code) {
     case 'KeyW': case 'ArrowUp': keys.forward = true; break;
     case 'KeyS': case 'ArrowDown': keys.back = true; break;
@@ -391,12 +393,16 @@ for (const [input, run] of [[genInput, runGenerate], [itInput, runIterate], [lig
 // ─────────────────────────────────────────────────────────────────────────
 //  Generate / iterate flows
 // ─────────────────────────────────────────────────────────────────────────
-async function runGenerate() {
+function runGenerate() {
   const prompt = genInput.value.trim();
   if (!prompt) { genInput.focus(); return; }
   const placement = pendingPlacement ? pendingPlacement.clone() : groundPointAhead();
   closePanels(true);
+  generateAt(prompt, placement);
+}
 
+// Core generate flow, callable from the UI or the voice layer.
+async function generateAt(prompt, placement) {
   // Instant wireframe box, then swap to the image billboard once it arrives.
   let ph = addBoxPlaceholder(placement);
   toast(`Imagining “${prompt}”…`, true);
@@ -427,14 +433,20 @@ async function runGenerate() {
   }
 }
 
-async function runIterate() {
+function runIterate() {
   if (!selectedId) return;
   const entry = store.get(selectedId);
   const instruction = itInput.value.trim();
   if (!entry || !instruction) { itInput.focus(); return; }
   const id = selectedId;
   closePanels(true);
+  iterateOn(id, instruction);
+}
 
+// Core iterate flow, callable from the UI or the voice layer.
+async function iterateOn(id, instruction) {
+  const entry = store.get(id);
+  if (!entry || !instruction) return;
   const placement = entry.placement.position.clone();
   let ph = null;
   toast(`Re-imagining: “${instruction}”…`, true);
@@ -517,11 +529,15 @@ function applyLighting(cfg) {
   if (Number.isFinite(cfg.exposure)) renderer.toneMappingExposure = clamp(cfg.exposure, 0.1, 3);
 }
 
-async function runLighting() {
+function runLighting() {
   const prompt = lightInput.value.trim();
   if (!prompt) { lightInput.focus(); return; }
   closePanels(true);
+  applyLightingPrompt(prompt);
+}
 
+// Core lighting flow, callable from the UI or the voice layer.
+async function applyLightingPrompt(prompt) {
   toast(`Lighting: “${prompt}”…`, true);
   try {
     const cfg = await setLighting({ prompt, current: currentLighting() });
@@ -771,4 +787,66 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+//  Voice layer (LiveKit) — the agent only triggers the functions above
+// ─────────────────────────────────────────────────────────────────────────
+const voiceEl = document.getElementById('voice');
+const voiceOnOff = document.getElementById('voice-onoff');
+const voiceState = document.getElementById('voice-state');
+
+// Map an inbound agent command onto the existing scene functions.
+function handleVoiceCommand(msg) {
+  if (!msg || !msg.type) return;
+  switch (msg.type) {
+    case 'generate':
+      generateAt(msg.prompt || 'an object', groundPointAhead()); // placed in front of the player
+      break;
+    case 'iterate': {
+      const id = selectedId || hoverObjectId;
+      if (!id) { toast('Look at or select an object first', false, 2600); break; }
+      setSelected(id);
+      iterateOn(id, msg.instruction || '');
+      break;
+    }
+    case 'lighting':
+      applyLightingPrompt(msg.description || '');
+      break;
+    case 'queue_world': // STUB — wire worldgen later
+      toast(`(stub) queue world: “${msg.prompt || ''}”`, false, 2600);
+      break;
+    case 'retrieve':    // STUB — wire Moss retrieval later
+      toast(`(stub) retrieve: “${msg.query || ''}”`, false, 2600);
+      break;
+    default:
+      console.warn('[voice] unknown command', msg);
+  }
+}
+
+const voice = createVoice({
+  onCommand: handleVoiceCommand,
+  onState: (s) => {
+    if ('connected' in s) {
+      voiceEl.classList.toggle('on', s.connected);
+      voiceOnOff.textContent = s.connected ? 'on' : 'off';
+    }
+    if ('agentSpeaking' in s) voiceEl.classList.toggle('agent-speaking', !!s.agentSpeaking);
+    if ('userSpeaking' in s) voiceEl.classList.toggle('user-speaking', !!s.userSpeaking);
+    if (!voice || !voice.isConnected()) voiceState.textContent = '';
+    else if (s.agentSpeaking) voiceState.textContent = 'speaking';
+    else if (s.userSpeaking) voiceState.textContent = 'hearing you';
+    else voiceState.textContent = 'listening';
+  },
+});
+
+voiceEl.addEventListener('click', async () => {
+  if (!voice.isConnected()) voiceState.textContent = 'connecting…';
+  try {
+    await voice.toggle();
+  } catch (err) {
+    console.error(err);
+    toast(`Voice: ${err.message}`, false, 4500);
+    voiceState.textContent = '';
+  }
 });

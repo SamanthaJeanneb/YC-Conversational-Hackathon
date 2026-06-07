@@ -39,6 +39,7 @@ Check the backend is wired up: http://localhost:8787/api/health
 | **Generate** | **Right-click** the ground/surface → generate menu (placed at the crosshair) |
 | **Move** | `G` to grab the object under the crosshair; it follows you — **left-click** to place, **right-click**/`Esc` to cancel |
 | **Lighting** | `L` → describe the lighting in natural language; applied live |
+| **Voice** | `V` or the **Voice** button → always-listening voice control (see `voice/`) |
 | Release | `Esc` |
 
 While an object generates, a fast **outline placeholder** (silhouette + edges traced
@@ -55,4 +56,21 @@ While a menu is open the pointer unlocks so you can type; it re-locks on close.
   point at the full Flask backend (`/api/generate-glb` + job polling) instead.
 - `src/store.js` — in-memory object store keyed by id; holds mesh + the hidden
   source image / prompt history used for iteration.
-- `server/index.js` — lean proxy: Gemini → Hunyuan 3.1, serves GLBs same-origin.
+- `server/index.js` — lean proxy: Gemini → Hunyuan 3.1, serves GLBs same-origin,
+  and mints LiveKit voice tokens (`/api/voice-token`).
+- `src/voice.js` + `voice/agent.py` — the optional real-time **voice layer**
+  (LiveKit Agents). The Python worker routes speech to the scene functions over
+  a data channel; it never touches three.js. See [`voice/README.md`](voice/README.md).
+
+## Voice control (optional)
+
+A LiveKit Agents worker (Deepgram STT → Claude Haiku 4.5 router → Minimax TTS)
+turns speech into calls on the generate / iterate / lighting functions. Quick start:
+
+```bash
+# add ANTHROPIC_API_KEY, DEEPGRAM_API_KEY, MINIMAX_API_KEY and LIVEKIT_* to .env
+cd voice && python3.11 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt && python agent.py download-files
+python agent.py dev          # worker auto-joins the room the browser opens
+```
+Then click **Voice** in the app. Full details in [`voice/README.md`](voice/README.md).
