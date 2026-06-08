@@ -1,91 +1,106 @@
-# WorldVoice
+# Atlas
 
 > Speak a world into existence, then redesign it with your voice.
 
-## What It Does
-
-WorldVoice generates full 3D environments from a spoken description and lets you
+Atlas generates full 3D environments from a spoken description and lets you
 iterate on them in real time through conversation. Describe a scene, walk through
 it in your browser, then keep talking to reshape it: add objects, change the
-lighting, restyle surfaces, swap materials. No 3D software, no modeling skills.
-Just your voice and a world that listens.
+lighting, restyle surfaces, swap materials. No 3D software, no modeling skills —
+just your voice and a world that listens.
+
+## Architecture
+
+![Atlas — full architecture](full_architecture.svg)
+
+Voice routes through LiveKit into an intent parser, which fans out to three
+paths — **world generation**, **scene iteration**, and **object placement** —
+all of which converge on a three.js renderer with a spoken response.
 
 ## How It Works
 
+### Qwen is the image engine behind everything
+
+Every 2D image in Atlas — the reference image that seeds a new world, the
+reference image behind each generated object, and the instruction-guided edit
+applied on every iteration — is produced by **Qwen-Image**. Because the whole
+system reduces "make a world / make an object / change this" down to *generate or
+edit an image, then lift it into 3D*, Qwen is the single model that makes both
+**world generation** and **object iteration** possible. It is the first link in
+the image provider chain (`server/index.js → imageGen()`), with Gemini and
+MiniMax kept only as fallbacks.
+
 ### World Generation — generative world models + Gaussian splatting
 
-A natural-language or image prompt is lifted into a fully navigable 3D world by
-**Tencent HY-World 2.0**, a generative *world model* rather than a single-image
-generator. The pipeline is a cascade of diffusion and neural-reconstruction
-stages:
+A spoken prompt is turned into a Qwen reference image, then lifted into a fully
+navigable 3D world by **Tencent HY-World 2.0**, a generative *world model* rather
+than a single-image generator. The pipeline is a cascade of diffusion and
+neural-reconstruction stages:
 
-- **HY-Pano 2.0** — a panoramic latent-diffusion model synthesizes a seamless
-  360° equirectangular environment from the prompt, fixing global scene
+- **HY-Pano 2.0** — panoramic latent diffusion synthesizes a seamless 360°
+  equirectangular environment from the Qwen reference, fixing global scene
   structure, illumination, and style in one coherent shot.
-- **WorldNav** — plans a camera trajectory through the panorama, sampling the
-  viewpoints needed to recover parallax and occlusion cues.
-- **WorldStereo 2.0** — multi-view stereo with monocular depth priors lifts the
-  posed 2D views into metric 3D geometry.
+- **WorldNav (Qwen3-VL + navmesh)** — a Qwen3-VL vision-language model reads the
+  panorama, plans a camera trajectory through it, and builds a navmesh — sampling
+  the viewpoints needed to recover parallax and occlusion cues.
+- **WorldStereo 2.0** — multi-view stereo (17B) with monocular depth priors
+  lifts the posed 2D views into metric 3D geometry.
 - **WorldMirror 2.0** — a feed-forward neural reconstruction model fuses the
   posed views into a dense, geometrically consistent scene.
-- **3DGS** — the scene is exported as a **3D Gaussian Splatting** radiance field
-  for photoreal, real-time rendering, alongside a watertight **GLB** mesh for
+- **3DGS + GLB** — exported as a **3D Gaussian Splatting** radiance field for
+  photoreal real-time rendering, alongside a watertight **GLB** mesh for
   collision, physics, and AR.
 
 Unlike video-diffusion "world simulators" that hallucinate frames, this produces
-*persistent, explorable geometry* — real 3D assets you can walk through, not a
-rendered fly-through. The pipeline runs on cloud **A100** GPUs.
+*persistent, explorable geometry* — real 3D assets you can walk through. The
+pipeline runs on cloud **A100** GPUs.
 
-### Voice Interaction — streaming STT → LLM intent parsing
+### 3D Iteration — Qwen image editing + neural re-reconstruction
 
-**LiveKit** provides low-latency WebRTC audio transport. Streaming speech-to-text
-feeds a **Claude** intent parser that maps free-form utterances onto a typed
-command schema via structured tool-calling: generate a new world, drop an
-object, change the lighting, restyle a surface, or teleport to a location. Each
-command routes to either an asynchronous generation job or an instant
-client-side scene operation, so conversational latency stays decoupled from heavy
-GPU work.
+To iterate we close a *perception → edit → reconstruction* loop. The current
+viewport is captured; **Qwen-Image** applies the requested change (restyle,
+recolor, add detail, shift atmosphere) as an instruction-guided edit; the edited
+view is shown for approval, then re-projected through **WorldMirror 2.0** to
+reconstruct updated 3D geometry in place. One voice command updates the scene
+without regenerating the whole world.
 
-### 3D Iteration — diffusion image editing + neural re-reconstruction
+### Object Generation — image-to-3D mesh
 
-To iterate on a generated world we close a *perception → edit → reconstruction*
-loop. The current viewport is captured; **Qwen-Image**, an instruction-guided
-diffusion editor, applies the requested change (restyle, recolor, add detail,
-shift atmosphere); and the edited view is re-projected through **WorldMirror
-2.0** to reconstruct updated 3D geometry in place. This updates the scene from a
-single voice command without regenerating the entire world.
+"Add a bench here" generates a Qwen reference image, then turns it into a 3D mesh
+with **Hunyuan 3.1** (image-to-3D on Replicate), falling back to **Tripo3D** if
+Hunyuan is unavailable. The resulting GLB drops into the live scene at the spot
+you're looking at.
+
+### Voice Interaction — LiveKit Inference
+
+**LiveKit** provides low-latency WebRTC audio transport, and the agent
+(`voice/agent.py`) routes STT, the routing LLM, and TTS through **LiveKit
+Inference** — one bill, no extra provider keys. Streaming **Deepgram Nova-3**
+transcribes speech; **GPT-4.1-mini** parses each utterance into exactly one typed
+tool call (generate world, generate object, iterate, set lighting, …); and
+**Cartesia Sonic-2** speaks the confirmation. The LLM only picks a tool and fills
+its args — tools speak fixed short confirmations — so conversational latency
+stays decoupled from heavy GPU work.
 
 ### Rendering and AR — three.js + WebXR
 
 The world loads in the browser via **three.js** (WebGL2). First-person
 navigation lets you walk the environment on desktop; on WebXR-capable mobile, the
-generated world is anchored into your physical space as **AR**. Objects generated
+generated world anchors into your physical space as **AR**. Objects generated
 mid-session drop into the live scene as GLB meshes.
-
-## Architecture
-
-```
-Voice Input → LiveKit (audio transport)
-    → STT → Claude (intent parsing)
-        → "rooftop garden"        → HY-World 2.0 (async, full worldgen → 3DGS + GLB)
-        → "make the walls brick"  → Qwen (image edit) → WorldMirror 2.0 (reconstruct) → scene update
-        → "add a bench here"      → image-to-3D diffusion (Hunyuan3D / Tripo3D) → drop GLB into scene
-        → "make it sunset"        → client-side lighting change (instant)
-    → three.js / WebXR (rendering)
-    → Minimax TTS (spoken response)
-```
 
 ## Tech Stack
 
-- **World Generation:** HY-World 2.0 (HY-Pano 2.0, WorldNav, WorldStereo 2.0, WorldMirror 2.0) → 3D Gaussian Splatting + GLB
-- **3D Iteration:** Qwen-Image (diffusion image editing) + WorldMirror 2.0 (neural 3D reconstruction from edited views)
-- **Image Generation:** Minimax image-01
-- **Object Generation:** image-to-3D diffusion (Hunyuan3D / Tripo3D)
-- **Voice Transport:** LiveKit
-- **Intent Parsing:** Claude (Anthropic)
-- **Speech:** streaming STT + Minimax TTS
-- **Rendering:** three.js, WebXR
-- **Infrastructure:** RunPod (A100 GPUs), AWS
+- **Image Generation (all of it):** Qwen-Image — world reference images, object
+  reference images, and iteration edits (Gemini / MiniMax as fallbacks)
+- **World Generation:** HY-World 2.0 — HY-Pano 2.0, WorldNav (Qwen3-VL + navmesh),
+  WorldStereo 2.0, WorldMirror 2.0 → 3D Gaussian Splatting + GLB
+- **3D Iteration:** Qwen-Image (instruction-guided editing) + WorldMirror 2.0
+  (neural 3D reconstruction from edited views)
+- **Object Generation:** Hunyuan 3.1 (image-to-3D), Tripo3D fallback
+- **Voice:** LiveKit (WebRTC) + LiveKit Inference — Deepgram Nova-3 (STT),
+  GPT-4.1-mini (intent / tool-routing), Cartesia Sonic-2 (TTS)
+- **Rendering:** three.js (WebGL2), WebXR
+- **Infrastructure:** RunPod (A100 GPUs)
 
 ## Hackathon Tracks
 
