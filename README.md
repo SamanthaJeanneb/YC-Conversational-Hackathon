@@ -18,16 +18,6 @@ all of which converge on a three.js renderer with a spoken response.
 
 ## How It Works
 
-### Qwen is the image engine behind everything
-
-Every 2D image in Atlas — the reference image that seeds a new world, the
-reference image behind each generated object, and the instruction-guided edit
-applied on every iteration — is produced by **Qwen-Image**. Because the whole
-system reduces "make a world / make an object / change this" down to *generate or
-edit an image, then lift it into 3D*, Qwen is the single model that makes both
-**world generation** and **object iteration** possible. It is the first link in
-the image provider chain (`server/index.js → imageGen()`), with Gemini and
-MiniMax kept only as fallbacks.
 
 ### World Generation — generative world models + Gaussian splatting
 
@@ -90,7 +80,7 @@ mid-session drop into the live scene as GLB meshes.
 
 ## Tech Stack
 
-- **Image Generation (all of it):** Qwen-Image — world reference images, object
+- **Image Generation:** Qwen-Image — world reference images, object
   reference images, and iteration edits (Gemini / MiniMax as fallbacks)
 - **World Generation:** HY-World 2.0 — HY-Pano 2.0, WorldNav (Qwen3-VL + navmesh),
   WorldStereo 2.0, WorldMirror 2.0 → 3D Gaussian Splatting + GLB
