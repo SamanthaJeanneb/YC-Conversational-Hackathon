@@ -305,6 +305,10 @@ async def entrypoint(ctx: JobContext):
     # a world is loaded never re-asks "what world would you like to build?".
     # On a fresh page (flat world again) the tag is absent and we greet normally.
     if "built" not in ctx.room.name:
+        # Wait for the human to actually join (and subscribe to our audio track)
+        # before speaking — otherwise the greeting is published to an empty room
+        # and lost, which reads as "the agent never says anything at the start".
+        await ctx.wait_for_participant()
         agent._say(session, "Hi! What kind of world would you like to build?")
 
 

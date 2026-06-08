@@ -63,7 +63,7 @@ export async function iterateImage({ sourceImage, prompt, instruction }) {
 }
 
 /**
- * STEP 2 — IMAGE → MODEL: image → Hunyuan 3.1 GLB (slow; 100k faces, PBR).
+ * STEP 2 — IMAGE → MODEL: image → Hunyuan 3.1 GLB (fast preset; 20k faces, no PBR).
  * @param {{ image: string, prompt: string }} args
  * @returns {Promise<{ modelUrl: string, image: string, prompt: string }>}
  */

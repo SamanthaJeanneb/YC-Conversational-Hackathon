@@ -37,7 +37,9 @@ const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 
 // PRIMARY mesh provider: Hunyuan 3.1 on Replicate. Tripo3D (below) is the fallback.
 const HUNYUAN_MODEL = 'tencent/hunyuan-3d-3.1';
-const HUNYUAN_OPTS = { face_count: 100000, enable_pbr: true, generate_type: 'Normal' };
+// PBR off + low face count = much faster generation (skips material baking and
+// keeps the mesh light). Bump these back up for higher-fidelity output.
+const HUNYUAN_OPTS = { face_count: 20000, enable_pbr: false, generate_type: 'Normal' };
 // useFileOutput:false → run() resolves file outputs to plain URL strings.
 const replicate = REPLICATE_TOKEN ? new Replicate({ auth: REPLICATE_TOKEN, useFileOutput: false }) : null;
 
@@ -153,10 +155,11 @@ async function imageGen({ prompt, sourceImage }) {
 const TRIPO_API_KEY = process.env.TRIPO_API_KEY;
 const TRIPO_BASE = 'https://api.tripo3d.ai/v2/openapi';
 const TRIPO_MODEL_VERSION = process.env.TRIPO_MODEL_VERSION || 'v2.5-20250123';
+// PBR off + low face limit = much faster generation. Override via env for fidelity.
 const TRIPO_OPTS = {
   texture_quality: process.env.TRIPO_TEXTURE_QUALITY || 'standard', // standard | detailed
-  pbr: true,
-  face_limit: Number(process.env.TRIPO_FACE_LIMIT || 20000),
+  pbr: false,
+  face_limit: Number(process.env.TRIPO_FACE_LIMIT || 10000),
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
